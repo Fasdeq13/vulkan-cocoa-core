@@ -1,25 +1,29 @@
 cmake_minimum_required(VERSION 3.15)
-project(DarlingQuartzCore LANGUAGES C)
+project(DarlingQuartzCore LANGUAGES OBJC CXX)
 
-set(CMAKE_C_COMPILER "clang")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fobjc-runtime=gnustep -fblocks -fno-objc-arc -fPIC")
+set(CMAKE_OBJC_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
-include_directories(
-    /usr/include/GNUstep
-)
+find_package(Vulkan REQUIRED)
 
-add_library(QuartzCore SHARED
+add_library(DarlingQuartzCore SHARED
     CAMetalLayer.m
     QuartzCoreClasses.m
 )
 
-set_source_files_properties(CAMetalLayer.m PROPERTIES COMPILE_FLAGS "-x objective-c")
-set_source_files_properties(QuartzCoreClasses.m PROPERTIES COMPILE_FLAGS "-x objective-c")
-
-target_link_libraries(QuartzCore PRIVATE objc)
-
-set_target_properties(QuartzCore PROPERTIES 
-    OUTPUT_NAME "QuartzCore"
-    PREFIX ""
-    SUFFIX ".so"
+target_include_directories(DarlingQuartzCore PUBLIC
+    .
+    ../DarlingMetal/include
+    ${Vulkan_INCLUDE_DIRS}
 )
+
+target_link_libraries(DarlingQuartzCore PRIVATE
+    ${Vulkan_LIBRARIES}
+)
+
+if(APPLE)
+    target_link_options(DarlingQuartzCore PRIVATE "-framework" "Foundation")
+else()
+    target_compile_options(DarlingQuartzCore PRIVATE "-fobjc-runtime=gnustep" "-fblocks")
+    target_link_libraries(DarlingQuartzCore PRIVATE objc)
+endif()
