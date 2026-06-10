@@ -1,23 +1,20 @@
 cmake_minimum_required(VERSION 3.15)
-project(DarlingAppServices LANGUAGES C)
+project(DarlingAppServices LANGUAGES OBJC CXX)
 
-set(CMAKE_C_COMPILER "clang")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fobjc-runtime=gnustep -fblocks -fno-objc-arc -fPIC")
+set(CMAKE_OBJC_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
-include_directories(
-    /usr/include/GNUstep
-)
-
-add_library(ApplicationServices SHARED
+add_library(DarlingAppServices SHARED
     AppServicesClasses.m
 )
 
-set_source_files_properties(AppServicesClasses.m PROPERTIES COMPILE_FLAGS "-x objective-c")
-
-target_link_libraries(ApplicationServices PRIVATE objc)
-
-set_target_properties(ApplicationServices PROPERTIES 
-    OUTPUT_NAME "ApplicationServices"
-    PREFIX ""
-    SUFFIX ".so"
+target_include_directories(DarlingAppServices PUBLIC
+    .
 )
+
+if(APPLE)
+    target_link_options(DarlingAppServices PRIVATE "-framework" "Foundation")
+else()
+    target_compile_options(DarlingAppServices PRIVATE "-fobjc-runtime=gnustep" "-fblocks")
+    target_link_libraries(DarlingAppServices PRIVATE objc)
+endif()
