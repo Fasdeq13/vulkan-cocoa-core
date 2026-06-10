@@ -1,61 +1,29 @@
-#ifndef MTLDevice_h
-#define MTLDevice_h
+#import <Foundation/Foundation.h>
 
-#import <Metal/Metal.h>
+@protocol MTLCommandQueue;
+@protocol MTLBuffer;
+@protocol MTLTexture;
 
-@interface DarlingMTLCommandQueue : NSObject <MTLCommandQueue>
+@protocol MTLDevice <NSObject>
+
+@property (readonly) NSString *name;
+
+- (id<MTLCommandQueue>)newCommandQueue;
+- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)maxCount;
+
+- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options;
+- (id<MTLBuffer>)newBufferWithBytes:(const void *)pointer length:(NSUInteger)length options:(NSUInteger)options;
+
+- (id<MTLTexture>)newTextureWithDescriptor:(id)descriptor;
+
+- (id)newLibraryWithSource:(NSString *)source options:(id)options error:(NSError **)error;
+- (id)newDefaultLibrary;
+- (id)newRenderPipelineStateWithDescriptor:(id)descriptor error:(NSError **)error;
+- (id)newComputePipelineStateWithDescriptor:(id)descriptor error:(NSError **)error;
+
+- (BOOL)supportsFamily:(NSInteger)family;
+- (BOOL)supportsFeatureSet:(NSUInteger)featureSet;
+
 @end
 
-@interface DarlingMTLBuffer : NSObject <MTLBuffer>
-- (instancetype)initWithLength:(NSUInteger)length;
-@end
-
-@interface DarlingMTLLibrary : NSObject <MTLLibrary>
-@end
-
-@interface DarlingMTLRenderPipelineState : NSObject <MTLRenderPipelineState>
-@end
-
-@interface DarlingMTLComputePipelineState : NSObject <MTLComputePipelineState>
-@end
-
-@interface DarlingMTLTexture : NSObject <MTLTexture>
-@end
-
-@interface DarlingMTLSamplerState : NSObject <MTLSamplerState>
-@end
-
-@interface DarlingMTLDepthStencilState : NSObject <MTLDepthStencilState>
-@end
-
-@interface DarlingMTLSharedEvent : NSObject <MTLSharedEvent>
-@end
-
-@interface DarlingMTLEvent : NSObject <MTLEvent>
-@end
-
-@interface DarlingMTLHeap : NSObject <MTLHeap>
-@end
-
-@interface DarlingMTLArgumentEncoder : NSObject <MTLArgumentEncoder>
-@end
-
-@interface DarlingMTLRasterizationRateMap : NSObject <MTLRasterizationRateMap>
-@end
-
-@interface DarlingMTLIndirectCommandBuffer : NSObject <MTLIndirectCommandBuffer>
-@end
-
-@interface DarlingMTLAccelerationStructure : NSObject <MTLAccelerationStructure>
-@end
-
-@interface DarlingMTLCounterSampleBuffer : NSObject <MTLCounterSampleBuffer>
-@end
-
-@interface DarlingMTLDynamicLibrary : NSObject <MTLDynamicLibrary>
-@end
-
-@interface DarlingMTLDevice : NSObject <MTLDevice>
-@end
-
-#endif
+id<MTLDevice> MTLCreateSystemDefaultDevice(void);
