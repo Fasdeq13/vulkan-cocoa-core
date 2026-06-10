@@ -1,23 +1,36 @@
 cmake_minimum_required(VERSION 3.15)
-project(DarlingAppKit LANGUAGES C)
+project(DarlingAppKit LANGUAGES OBJC CXX)
 
-set(CMAKE_C_COMPILER "clang")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fobjc-runtime=gnustep -fblocks -fno-objc-arc -fPIC")
+set(CMAKE_OBJC_STANDARD 11)
+set(CMAKE_CXX_STANDARD 17)
 
-include_directories(
-    /usr/include/GNUstep
-)
+find_package(Vulkan REQUIRED)
 
-add_library(AppKit SHARED
+add_library(DarlingAppKit SHARED
     AppKitClasses.m
 )
 
-set_source_files_properties(AppKitClasses.m PROPERTIES COMPILE_FLAGS "-x objective-c")
-
-target_link_libraries(AppKit PRIVATE objc)
-
-set_target_properties(AppKit PROPERTIES 
-    OUTPUT_NAME "AppKit"
-    PREFIX ""
-    SUFFIX ".so"
+target_include_directories(DarlingAppKit PUBLIC
+    .
+    ../DarlingMetal/include
+    ../DarlingQuartzCore
+    ${Vulkan_INCLUDE_DIRS}
 )
+
+target_link_directories(DarlingAppKit PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../DarlingMetal/build
+    ${CMAKE_CURRENT_SOURCE_DIR}/../DarlingQuartzCore/build
+)
+
+target_link_libraries(DarlingAppKit PRIVATE
+    DarlingMetal
+    DarlingQuartzCore
+    ${Vulkan_LIBRARIES}
+)
+
+if(APPLE)
+    target_link_options(DarlingAppKit PRIVATE "-framework" "Foundation")
+else()
+    target_compile_options(DarlingAppKit PRIVATE "-fobjc-runtime=gnustep" "-fblocks")
+    target_link_libraries(DarlingAppKit PRIVATE objc)
+endif()
