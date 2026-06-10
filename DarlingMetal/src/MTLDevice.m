@@ -1,365 +1,381 @@
-#import <Metal/Metal.h>
+#import "../include/MTLDevice.h"
+#import <Foundation/Foundation.h>
 #include <vulkan/vulkan.h>
-#include <stdlib.h>
-#include <string.h>
 
-@interface DarlingMTLCommandQueue : NSObject <MTLCommandQueue>
-@end
-@implementation DarlingMTLCommandQueue
-- (id<MTLCommandBuffer>)commandBuffer { return nil; }
-- (id<MTLCommandBuffer>)commandBufferWithDescriptor:(MTLCommandBufferDescriptor *)descriptor { return nil; }
-- (id<MTLCommandBuffer>)commandBufferWithUnretainedReferences { return nil; }
-- (void)insertDebugCaptureBoundary {}
-- (NSString *)label { return @"DarlingQueue"; }
-- (void)setLabel:(NSString *)label {}
-- (id<MTLDevice>)device { return nil; }
+typedef struct {
+    VkInstance instance;
+    VkPhysicalDevice physicalDevice;
+    VkDevice device;
+    VkQueue graphicsQueue;
+    uint32_t queueFamilyIndex;
+} RavynMetalCoreContext;
+
+@interface MyMTLDevice : NSObject <MTLDevice>
+- (VkDevice)vulkanDevice;
 @end
 
-@interface DarlingMTLBuffer : NSObject <MTLBuffer> {
-    void* _storage;
-    NSUInteger _length;
+@interface MyMTLCommandQueue : NSObject <MTLCommandQueue>
+@property (readonly) id<MTLDevice> device;
+@end
+
+@implementation MyMTLCommandQueue {
+    id<MTLDevice> _device;
+    VkCommandPool _pool;
 }
-@end
-@implementation DarlingMTLBuffer
-- (instancetype)initWithLength:(NSUInteger)length {
+
+- (instancetype)initWithDevice:(id<MTLDevice>)device queueFamilyIndex:(uint32_t)idx vulkanDevice:(VkDevice)vulkanDevice {
     self = [super init];
-    if (self) {
-        _length = length;
-        _storage = calloc(1, length);
+    if (!self) return nil;
+    _device = device;
+
+    VkCommandPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = idx;
+
+    if (vkCreateCommandPool(vulkanDevice, &poolInfo, NULL, &_pool) != VK_SUCCESS) {
+        [self release];
+        return nil;
     }
     return self;
 }
+
+- (id<MTLDevice>)device {
+    return _device;
+}
+
 - (void)dealloc {
-    free(_storage);
+    if (_pool && _device && [_device respondsToSelector:@selector(vulkanDevice)]) {
+        VkDevice rawDevice = [(MyMTLDevice *)_device vulkanDevice];
+        if (rawDevice) {
+            vkDestroyCommandPool(rawDevice, _pool, NULL);
+        }
+    }
     [super dealloc];
 }
+@end
+
+@interface MyMTLBuffer : NSObject <MTLBuffer>
+@property (readonly) NSUInteger length;
+@property (readonly) void *contents;
+@end
+
+@implementation MyMTLBuffer {
+    VkBuffer _buffer;
+    VkDeviceMemory _memory;
+    NSUInteger _length;
+    void *_mappedData;
+    id<MTLDevice> _device;
+}
+
+- (instancetype)initWithDevice:(id<MTLDevice>)device length:(NSUInteger)length bytes:(const void *)pointer vulkanDevice:(VkDevice)vulkanDevice memoryProperties:(VkPhysicalDeviceMemoryProperties)memProps {
+    self = [super init];
+    if (!self) return nil;
+    _device = device;
+    _length = length;
+
+    VkBufferCreateInfo bufferInfo = {};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = length;
+    bufferInfo.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+    bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(vulkanDevice, &bufferInfo, NULL, &_buffer) != VK_SUCCESS) {
+        [self release];
+        return nil;
+    }
+
+    VkMemoryRequirements memReqs;
+    vkGetBufferMemoryRequirements(vulkanDevice, _buffer, &memReqs);
+
+    uint32_t memTypeIdx = UINT32_MAX;
+    VkMemoryPropertyFlags flags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReqs.memoryTypeBits & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & flags) == flags) {
+            memTypeIdx = i;
+            break;
+        }
+    }
+
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = memTypeIdx;
+
+    if (vkAllocateMemory(vulkanDevice, &allocInfo, NULL, &_memory) != VK_SUCCESS) {
+        vkDestroyBuffer(vulkanDevice, _buffer, NULL);
+        [self release];
+        return nil;
+    }
+
+    vkBindBufferMemory(vulkanDevice, _buffer, _memory, 0);
+
+    if (vkMapMemory(vulkanDevice, _memory, 0, length, 0, &_mappedData) == VK_SUCCESS && pointer) {
+        memcpy(_mappedData, pointer, length);
+    }
+
+    return self;
+}
+
 - (NSUInteger)length { return _length; }
-- (void*)contents { return _storage; }
-- (void)didModifyRange:(NSRange)range {}
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor offset:(NSUInteger)offset bytesPerRow:(NSUInteger)bytesPerRow { return nil; }
-- (void)removeAllDebugMarkers {}
-- (void)addDebugMarker:(NSString *)marker range:(NSRange)range {}
-- (NSString *)label { return @"DarlingBuffer"; }
-- (void)setLabel:(NSString *)label {}
-- (id<MTLDevice>)device { return nil; }
-- (NSUInteger)allocatedSize { return _length; }
-- (NSUInteger)cpuCacheMode { return 0; }
-- (NSUInteger)storageMode { return 0; }
-- (NSUInteger)hazardTrackingMode { return 0; }
-- (NSUInteger)resourceOptions { return 0; }
-- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state { return MTLPurgeableStateKeepCurrent; }
-- (id<MTLHeap>)heap { return nil; }
-- (NSUInteger)heapOffset { return 0; }
-- (BOOL)isAliasable { return NO; }
-- (void)makeAliasable {}
-@end
+- (void *)contents { return _mappedData; }
 
-@interface DarlingMTLLibrary : NSObject <MTLLibrary>
-@end
-@implementation DarlingMTLLibrary
-- (NSString *)label { return @"DarlingLibrary"; }
-- (void)setLabel:(NSString *)label {}
-- (id<MTLDevice>)device { return nil; }
-- (NSArray<NSString *> *)functionNames { return @[]; }
-- (id<MTLFunction>)newFunctionWithName:(NSString *)functionName { return nil; }
-- (void)newFunctionWithName:(NSString *)functionName constantValues:(MTLFunctionConstantValues *)constantValues completionHandler:(void (^)(id<MTLFunction>, NSError *))completionHandler {}
-- (id<MTLFunction>)newFunctionWithName:(NSString *)functionName constantValues:(MTLFunctionConstantValues *)constantValues error:(NSError **)error { return nil; }
-- (void)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor completionHandler:(void (^)(id<MTLFunction>, NSError *))completionHandler {}
-- (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)descriptor error:(NSError **)error { return nil; }
-- (id<MTLFunction>)newIntersectionFunctionWithDescriptor:(MTLIntersectionFunctionDescriptor *)descriptor error:(NSError **)error { return nil; }
-- (void)newIntersectionFunctionWithDescriptor:(MTLIntersectionFunctionDescriptor *)descriptor completionHandler:(void (^)(id<MTLFunction>, NSError *))completionHandler {}
-- (MTLLibraryType)type { return MTLLibraryTypeExecutable; }
-- (NSString *)installName { return nil; }
-@end
-
-@interface DarlingMTLDevice : NSObject <MTLDevice> {
-    VkInstance _instance;
-    VkPhysicalDevice _physDevice;
-    VkDevice _device;
+- (void)dealloc {
+    if (_device && [_device respondsToSelector:@selector(vulkanDevice)]) {
+        VkDevice rawDevice = [(MyMTLDevice *)_device vulkanDevice];
+        if (rawDevice) {
+            if (_mappedData) vkUnmapMemory(rawDevice, _memory);
+            if (_buffer) vkDestroyBuffer(rawDevice, _buffer, NULL);
+            if (_memory) vkFreeMemory(rawDevice, _memory, NULL);
+        }
+    }
+    [super dealloc];
 }
 @end
 
-@implementation DarlingMTLDevice
+@interface MyMTLTexture : NSObject <MTLTexture>
+@end
+
+@implementation MyMTLTexture {
+    VkImage _image;
+    VkDeviceMemory _memory;
+    id<MTLDevice> _device;
+}
+
+- (instancetype)initWithDevice:(id<MTLDevice>)device vulkanDevice:(VkDevice)vulkanDevice memoryProperties:(VkPhysicalDeviceMemoryProperties)memProps {
+    self = [super init];
+    if (!self) return nil;
+    _device = device;
+
+    VkImageCreateInfo imageInfo = {};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_2D;
+    imageInfo.format = VK_FORMAT_B8G8R8A8_UNORM;
+    imageInfo.extent.width = 1024;
+    imageInfo.extent.height = 1024;
+    imageInfo.extent.depth = 1;
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    if (vkCreateImage(vulkanDevice, &imageInfo, NULL, &_image) != VK_SUCCESS) {
+        [self release];
+        return nil;
+    }
+
+    VkMemoryRequirements memReqs;
+    vkGetImageMemoryRequirements(vulkanDevice, _image, &memReqs);
+
+    uint32_t memTypeIdx = UINT32_MAX;
+    for (uint32_t i = 0; i < memProps.memoryTypeCount; i++) {
+        if ((memReqs.memoryTypeBits & (1 << i)) && (memProps.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)) {
+            memTypeIdx = i;
+            break;
+        }
+    }
+
+    VkMemoryAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    allocInfo.allocationSize = memReqs.size;
+    allocInfo.memoryTypeIndex = memTypeIdx;
+
+    if (vkAllocateMemory(vulkanDevice, &allocInfo, NULL, &_memory) != VK_SUCCESS) {
+        vkDestroyImage(vulkanDevice, _image, NULL);
+        [self release];
+        return nil;
+    }
+
+    vkBindImageMemory(vulkanDevice, _image, _memory, 0);
+    return self;
+}
+
+- (void)dealloc {
+    if (_device && [_device respondsToSelector:@selector(vulkanDevice)]) {
+        VkDevice rawDevice = [(MyMTLDevice *)_device vulkanDevice];
+        if (rawDevice) {
+            if (_image) vkDestroyImage(rawDevice, _image, NULL);
+            if (_memory) vkFreeMemory(rawDevice, _memory, NULL);
+        }
+    }
+    [super dealloc];
+}
+@end
+
+@implementation MyMTLDevice {
+    RavynMetalCoreContext *_context;
+    NSString *_deviceName;
+    VkPhysicalDeviceMemoryProperties _memProps;
+}
+
+- (VkDevice)vulkanDevice {
+    return _context ? _context->device : VK_NULL_HANDLE;
+}
 
 - (instancetype)init {
     self = [super init];
-    if (self) {
-        VkApplicationInfo appInfo = {};
-        appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
-        appInfo.apiVersion = VK_API_VERSION_1_4;
-        
-        VkInstanceCreateInfo createInfo = {};
-        createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
-        createInfo.pApplicationInfo = &appInfo;
-        
-        if (vkCreateInstance(&createInfo, NULL, &_instance) == VK_SUCCESS) {
-            uint32_t count = 0;
-            vkEnumeratePhysicalDevices(_instance, &count, NULL);
-            if (count > 0) {
-                VkPhysicalDevice* devices = (VkPhysicalDevice*)malloc(sizeof(VkPhysicalDevice) * count);
-                vkEnumeratePhysicalDevices(_instance, &count, devices);
-                _physDevice = devices[0];
-                free(devices);
-                
-                float priority = 1.0f;
-                VkDeviceQueueCreateInfo queueInfo = {};
-                queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-                queueInfo.queueCount = 1;
-                queueInfo.pQueuePriorities = &priority;
-                
-                VkDeviceCreateInfo devInfo = {};
-                devInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-                devInfo.queueCreateInfoCount = 1;
-                devInfo.pQueueCreateInfos = &queueInfo;
-                
-                vkCreateDevice(_physDevice, &devInfo, NULL, &_device);
-            }
+    if (!self) return nil;
+
+    _context = malloc(sizeof(RavynMetalCoreContext));
+    if (!_context) return nil;
+    memset(_context, 0, sizeof(RavynMetalCoreContext));
+
+    VkApplicationInfo appInfo = {};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = "ravynOS Metal Runtime";
+    appInfo.apiVersion = VK_API_VERSION_1_4;
+
+    const char* instanceExtensions[] = {
+        VK_KHR_SURFACE_EXTENSION_NAME,
+#if defined(__linux__)
+        "VK_KHR_xlib_surface"
+#elif defined(__APPLE__) || defined(__MACH__)
+        "VK_EXT_metal_surface"
+#endif
+    };
+
+    VkInstanceCreateInfo createInfo = {};
+    createInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    createInfo.pApplicationInfo = &appInfo;
+    createInfo.enabledExtensionCount = sizeof(instanceExtensions) / sizeof(const char*);
+    createInfo.ppEnabledExtensionNames = instanceExtensions;
+
+    if (vkCreateInstance(&createInfo, NULL, &_context->instance) != VK_SUCCESS) {
+        free(_context);
+        return nil;
+    }
+
+    uint32_t deviceCount = 0;
+    vkEnumeratePhysicalDevices(_context->instance, &deviceCount, NULL);
+    if (deviceCount == 0) {
+        vkDestroyInstance(_context->instance, NULL);
+        free(_context);
+        return nil;
+    }
+
+    VkPhysicalDevice *devices = malloc(sizeof(VkPhysicalDevice) * deviceCount);
+    vkEnumeratePhysicalDevices(_context->instance, &deviceCount, devices);
+
+    _context->physicalDevice = devices[0];
+    for (uint32_t i = 0; i < deviceCount; i++) {
+        VkPhysicalDeviceProperties props;
+        vkGetPhysicalDeviceProperties(devices[i], &props);
+        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
+            _context->physicalDevice = devices[i];
+            break;
         }
     }
+    free(devices);
+
+    VkPhysicalDeviceProperties activeProperties;
+    vkGetPhysicalDeviceProperties(_context->physicalDevice, &activeProperties);
+    vkGetPhysicalDeviceMemoryProperties(_context->physicalDevice, &_memProps);
+    _deviceName = [[NSString alloc] initWithUTF8String:activeProperties.deviceName];
+
+    uint32_t queueFamilyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(_context->physicalDevice, &queueFamilyCount, NULL);
+    VkQueueFamilyProperties *queueFamilies = malloc(sizeof(VkQueueFamilyProperties) * queueFamilyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(_context->physicalDevice, &queueFamilyCount, queueFamilies);
+
+    _context->queueFamilyIndex = UINT32_MAX;
+    for (uint32_t i = 0; i < queueFamilyCount; i++) {
+        if (queueFamilies[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+            _context->queueFamilyIndex = i;
+            break;
+        }
+    }
+    free(queueFamilies);
+
+    if (_context->queueFamilyIndex == UINT32_MAX) {
+        [_deviceName release];
+        vkDestroyInstance(_context->instance, NULL);
+        free(_context);
+        return nil;
+    }
+
+    float queuePriority = 1.0f;
+    VkDeviceQueueCreateInfo queueCreateInfo = {};
+    queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueCreateInfo.queueFamilyIndex = _context->queueFamilyIndex;
+    queueCreateInfo.queueCount = 1;
+    queueCreateInfo.pQueuePriorities = &queuePriority;
+
+    const char* deviceExtensions[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
+
+    VkDeviceCreateInfo deviceCreateInfo = {};
+    deviceCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceCreateInfo.queueCreateInfoCount = 1;
+    deviceCreateInfo.pQueueCreateInfos = &queueCreateInfo;
+    deviceCreateInfo.enabledExtensionCount = 1;
+    deviceCreateInfo.ppEnabledExtensionNames = deviceExtensions;
+
+    if (vkCreateDevice(_context->physicalDevice, &deviceCreateInfo, NULL, &_context->device) != VK_SUCCESS) {
+        [_deviceName release];
+        vkDestroyInstance(_context->instance, NULL);
+        free(_context);
+        return nil;
+    }
+
+    vkGetDeviceQueue(_context->device, _context->queueFamilyIndex, 0, &_context->graphicsQueue);
     return self;
 }
 
-- (void)dealloc {
-    if (_device) vkDestroyDevice(_device, NULL);
-    if (_instance) vkDestroyInstance(_instance, NULL);
-    [super dealloc];
-}
-
 - (NSString *)name {
-    if (_physDevice) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(_physDevice, &props);
-        return [NSString stringWithUTF8String:props.deviceName];
-    }
-    return @"NVIDIA GeForce RTX 4090";
+    return _deviceName;
 }
-
-- (uint64_t)registryID { return 424242; }
-- (MTLSize)maxThreadsPerThreadgroup { return MTLSizeMake(1024, 1024, 64); }
-- (BOOL)isLowPower { return NO; }
-- (BOOL)isHeadless { return NO; }
-- (BOOL)isRemovable { return NO; }
-- (BOOL)hasUnifiedMemory { return NO; }
-- (uint64_t)recommendedMaxWorkingSetSize { return 24ULL * 1024 * 1024 * 1024; }
-- (uint64_t)locationId { return 0; }
-- (MTLDeviceLocation)location { return MTLDeviceLocationBuiltIn; }
-- (uint64_t)maxTransferRate { return 32ULL * 1024 * 1024 * 1024; }
-- (BOOL)isDepth24Stencil8PixelFormatSupported { return YES; }
-- (MTLReadWriteTextureTier)readWriteTextureSupport { return MTLReadWriteTextureTier2; }
-- (MTLArgumentBuffersTier)argumentBuffersSupport { return MTLArgumentBuffersTier2; }
-- (BOOL)areRasterOrderGroupsSupported { return YES; }
-- (BOOL)supports32BitFloatFiltering { return YES; }
-- (BOOL)supports32BitMSAA { return YES; }
-- (BOOL)supportsQueryTextureSystemType { return YES; }
-- (MTLTimestamp)currentTimestamp { return 0; }
-
-- (BOOL)supportsFamily:(MTLGPUFamily)gpuFamily { return YES; }
-- (BOOL)supportsFeatureSet:(MTLFeatureSet)featureSet { return YES; }
 
 - (id<MTLCommandQueue>)newCommandQueue {
-    return [[[NSClassFromString(@"DarlingMTLCommandQueue") alloc] init] autorelease];
+    return (id<MTLCommandQueue>)[[MyMTLCommandQueue alloc] initWithDevice:self queueFamilyIndex:_context->queueFamilyIndex vulkanDevice:_context->device];
 }
 
 - (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)maxCount {
     return [self newCommandQueue];
 }
 
-- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(MTLResourceOptions)options {
-    return [[NSClassFromString(@"DarlingMTLBuffer") alloc] initWithLength:length];
+- (id<MTLBuffer>)newBufferWithLength:(NSUInteger)length options:(NSUInteger)options {
+    return (id<MTLBuffer>)[[MyMTLBuffer alloc] initWithDevice:self length:length bytes:NULL vulkanDevice:_context->device memoryProperties:_memProps];
 }
 
-- (id<MTLBuffer>)newBufferWithBytes:(const void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options {
-    id buf = [[NSClassFromString(@"DarlingMTLBuffer") alloc] initWithLength:length];
-    if (pointer && [buf respondsToSelector:@selector(contents)]) {
-        void* dest = (void*)[buf performSelector:@selector(contents)];
-        if (dest) memcpy(dest, pointer, length);
+- (id<MTLBuffer>)newBufferWithBytes:(const void *)pointer length:(NSUInteger)length options:(NSUInteger)options {
+    return (id<MTLBuffer>)[[MyMTLBuffer alloc] initWithDevice:self length:length bytes:pointer vulkanDevice:_context->device memoryProperties:_memProps];
+}
+
+- (id<MTLTexture>)newTextureWithDescriptor:(id)descriptor {
+    return (id<MTLTexture>)[[MyMTLTexture alloc] initWithDevice:self vulkanDevice:_context->device memoryProperties:_memProps];
+}
+
+- (id)newLibraryWithSource:(NSString *)source options:(id)options error:(NSError **)error { return nil; }
+- (id)newDefaultLibrary { return nil; }
+- (id)newRenderPipelineStateWithDescriptor:(id)descriptor error:(NSError **)error { return nil; }
+- (id)newComputePipelineStateWithDescriptor:(id)descriptor error:(NSError **)error { return nil; }
+
+- (BOOL)supportsFamily:(NSInteger)family {
+    return (family == 1 || family == 2 || family == 3 || family == 1001);
+}
+
+- (BOOL)supportsFeatureSet:(NSUInteger)featureSet {
+    return (featureSet == 1 || featureSet == 2);
+}
+
+- (void)dealloc {
+    if (_context) {
+        if (_context->device) {
+            vkDeviceWaitIdle(_context->device);
+            vkDestroyDevice(_context->device, NULL);
+        }
+        if (_context->instance) {
+            vkDestroyInstance(_context->instance, NULL);
+        }
+        free(_context);
     }
-    return buf;
+    if (_deviceName) [_deviceName release];
+    [super dealloc];
 }
-
-- (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)pointer length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *, NSUInteger))deallocator {
-    return [[NSClassFromString(@"DarlingMTLBuffer") alloc] initWithLength:length];
-}
-
-- (id<MTLLibrary>)newDefaultLibrary {
-    return [[[NSClassFromString(@"DarlingMTLLibrary") alloc] init] autorelease];
-}
-
-- (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)error {
-    return [self newDefaultLibrary];
-}
-
-- (id<MTLLibrary>)newLibraryWithFile:(NSString *)filepath error:(NSError **)error {
-    return [self newDefaultLibrary];
-}
-
-- (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)error {
-    return [self newDefaultLibrary];
-}
-
-- (id<MTLLibrary>)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options error:(NSError **)error {
-    return [self newDefaultLibrary];
-}
-
-- (void)newLibraryWithSource:(NSString *)source options:(MTLCompileOptions *)options completionHandler:(void (^)(id<MTLLibrary> _Nullable, NSError * _Nullable))completionHandler {
-    completionHandler([self newDefaultLibrary], NULL);
-}
-
-- (id<MTLLibrary>)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error {
-    return [self newDefaultLibrary];
-}
-
-- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor error:(NSError **)error {
-    return [[[NSClassFromString(@"DarlingMTLRenderPipelineState") alloc] init] autorelease];
-}
-
-- (void)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)descriptor completionHandler:(void (^)(id<MTLRenderPipelineState> _Nullable, NSError * _Nullable))completionHandler {
-    completionHandler([self newRenderPipelineStateWithDescriptor:descriptor error:NULL], NULL);
-}
-
-- (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction error:(NSError **)error {
-    return [[[NSClassFromString(@"DarlingMTLComputePipelineState") alloc] init] autorelease];
-}
-
-- (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction options:(MTLPipelineOption)options reflection:(MTLAutoreleasedComputePipelineReflection *)reflection error:(NSError **)error {
-    return [self newComputePipelineStateWithFunction:computeFunction error:error];
-}
-
-- (void)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction completionHandler:(void (^)(id<MTLComputePipelineState>, NSError *))completionHandler {
-    completionHandler([self newComputePipelineStateWithFunction:computeFunction error:NULL], NULL);
-}
-
-- (void)newComputePipelineStateWithFunction:(id<MTLFunction>)computeFunction options:(MTLPipelineOption)options completionHandler:(void (^)(id<MTLComputePipelineState>, MTLComputePipelineReflection *, NSError *))completionHandler {
-    completionHandler([self newComputePipelineStateWithFunction:computeFunction error:NULL], NULL, NULL);
-}
-
-- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)descriptor options:(MTLPipelineOption)options reflection:(MTLAutoreleasedComputePipelineReflection *)reflection error:(NSError **)error {
-    return [[[NSClassFromString(@"DarlingMTLComputePipelineState") alloc] init] autorelease];
-}
-
-- (void)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)descriptor options:(MTLPipelineOption)options completionHandler:(void (^)(id<MTLComputePipelineState>, MTLComputePipelineReflection *, NSError *))completionHandler {
-    completionHandler([[[NSClassFromString(@"DarlingMTLComputePipelineState") alloc] init] autorelease], NULL, NULL);
-}
-
-- (id<MTLCommandQueue>)newCommandQueueWithDescriptor:(MTLCommandQueueDescriptor *)descriptor {
-    return [self newCommandQueue];
-}
-
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
-    return [[[NSClassFromString(@"DarlingMTLTexture") alloc] init] autorelease];
-}
-
-- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)descriptor iosurface:(IOSurfaceRef)iosurface plane:(NSUInteger)plane {
-    return [self newTextureWithDescriptor:descriptor];
-}
-
-- (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)descriptor {
-    return [[[NSClassFromString(@"DarlingMTLSamplerState") alloc] init] autorelease];
-}
-
-- (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)descriptor {
-    return [[[NSClassFromString(@"DarlingMTLDepthStencilState") alloc] init] autorelease];
-}
-
-- (id<MTLTexture>)newSharedTextureWithDescriptor:(MTLTextureDescriptor *)descriptor {
-    return [self newTextureWithDescriptor:descriptor];
-}
-
-- (id<MTLTexture>)newSharedTextureWithHandle:(MTLSharedTextureHandle *)sharedHandle {
-    return [[[NSClassFromString(@"DarlingMTLTexture") alloc] init] autorelease];
-}
-
-- (id<MTLSharedEvent>)newSharedEvent {
-    return [[[NSClassFromString(@"DarlingMTLSharedEvent") alloc] init] autorelease];
-}
-
-- (id<MTLSharedEvent>)newSharedEventWithHandle:(MTLSharedEventHandle *)sharedHandle {
-    return [[[NSClassFromString(@"DarlingMTLSharedEvent") alloc] init] autorelease];
-}
-
-- (id<MTLEvent>)newEvent {
-    return [[[NSClassFromString(@"DarlingMTLEvent") alloc] init] autorelease];
-}
-
-- (id<MTLHeap>)newHeapWithDescriptor:(MTLHeapDescriptor *)descriptor {
-    return [[[NSClassFromString(@"DarlingMTLHeap") alloc] init] autorelease];
-}
-
-- (void)getDefaultSamplePositions:(MTLSamplePosition *)positions count:(NSUInteger)count {
-    if (count > 0 && positions) {
-        positions->x = 0.5f;
-        positions->y = 0.5f;
-    }
-}
-
-- (id<MTLArgumentEncoder>)newArgumentEncoderWithArguments:(NSArray<MTLArgumentDescriptor *> *)arguments {
-    return [[[NSClassFromString(@"DarlingMTLArgumentEncoder") alloc] init] autorelease];
-}
-
-- (BOOL)supportsRasterizationRateMapWithLayerCount:(NSUInteger)layerCount {
-    return YES;
-}
-
-- (id<MTLRasterizationRateMap>)newRasterizationRateMapWithDescriptor:(MTLRasterizationRateMapDescriptor *)descriptor {
-    return [[[NSClassFromString(@"DarlingMTLRasterizationRateMap") alloc] init] autorelease];
-}
-
-- (id<MTLIndirectCommandBuffer>)newIndirectCommandBufferWithDescriptor:(MTLIndirectCommandBufferDescriptor *)descriptor maxCommandCount:(NSUInteger)maxCount options:(MTLResourceOptions)options {
-    return [[[NSClassFromString(@"DarlingMTLIndirectCommandBuffer") alloc] init] autorelease];
-}
-
-- (MTLAccelerationStructureSizes)accelerationStructureSizesWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor {
-    MTLAccelerationStructureSizes s = {1024, 1024, 1024};
-    return s;
-}
-
-- (id<MTLAccelerationStructure>)newAccelerationStructureWithDescriptor:(MTLAccelerationStructureDescriptor *)descriptor {
-    return [[[NSClassFromString(@"DarlingMTLAccelerationStructure") alloc] init] autorelease];
-}
-
-- (id<MTLAccelerationStructure>)newAccelerationStructureWithLength:(NSUInteger)length {
-    return [[[NSClassFromString(@"DarlingMTLAccelerationStructure") alloc] init] autorelease];
-}
-
-- (BOOL)supportsVertexAmplificationCount:(NSUInteger)count {
-    return YES;
-}
-
-- (id<MTLCounterSampleBuffer>)newCounterSampleBufferWithDescriptor:(MTLCounterSampleBufferDescriptor *)descriptor error:(NSError **)error {
-    return [[[NSClassFromString(@"DarlingMTLCounterSampleBuffer") alloc] init] autorelease];
-}
-
-- (void)sampleTimestamps:(MTLTimestamp *)cpuTimestamp gpuTimestamp:(MTLTimestamp *)gpuTimestamp {
-    if (cpuTimestamp) *cpuTimestamp = 1000;
-    if (gpuTimestamp) *gpuTimestamp = 1000;
-}
-
-- (BOOL)supportsDynamicLibraries {
-    return YES;
-}
-
-- (id<MTLDynamicLibrary>)newDynamicLibraryWithURL:(NSURL *)url error:(NSError **)error {
-    return [[[NSClassFromString(@"DarlingMTLDynamicLibrary") alloc] init] autorelease];
-}
-
-- (id<MTLDynamicLibrary>)newDynamicLibrary:(id<MTLLibrary>)library error:(NSError **)error {
-    return [[[NSClassFromString(@"DarlingMTLDynamicLibrary") alloc] init] autorelease];
-}
-
-- (void)newLibraryWithStitchedDescriptor:(MTLStitchedLibraryDescriptor *)descriptor completionHandler:(void (^)(id<MTLLibrary> library, NSError *error))completionHandler {
-    completionHandler([[[NSClassFromString(@"DarlingMTLLibrary") alloc] init] autorelease], NULL);
-}
-
-- (id<MTLLibrary>)newLibraryWithStitchedDescriptor:(MTLStitchedLibraryDescriptor *)descriptor error:(NSError **)error {
-    return [[[NSClassFromString(@"DarlingMTLLibrary") alloc] init] autorelease];
-}
-
 @end
 
 id<MTLDevice> MTLCreateSystemDefaultDevice(void) {
-    static DarlingMTLDevice* globalDevice = nil;
-    if (!globalDevice) {
-        globalDevice = [[DarlingMTLDevice alloc] init];
-    }
-    return globalDevice;
+    return [[MyMTLDevice alloc] init];
 }
