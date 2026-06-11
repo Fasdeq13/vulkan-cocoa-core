@@ -1,0 +1,110 @@
+cmake_minimum_required(VERSION 3.19)
+
+if(DEFINED ENV{XNU_BUILD} OR APPLE OR NOT WIN32)
+    project(QuartzMetalVulkan LANGUAGES C CXX ObjC ObjCXX)
+else()
+    project(QuartzMetalVulkan LANGUAGES C CXX)
+endif()
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+if(NOT WIN32)
+    find_package(Vulkan REQUIRED)
+else()
+    if(DEFINED ENV{VULKAN_SDK})
+        set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include")
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/Lib/vulkan-1.lib")
+        else()
+            set(Vulkan_LIBRARY "$ENV{VULKAN_SDK}/Lib32/vulkan-1.lib")
+        endif()
+    else()
+        message(FATAL_ERROR "VULKAN_SDK environment variable not set. Framework compilation aborted.")
+    endif()
+    
+    add_library(Vulkan::Vulkan INTERFACE IMPORTED)
+    set_target_properties(Vulkan::Vulkan PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIR}"
+        INTERFACE_LINK_LIBRARIES "${Vulkan_LIBRARY}"
+    )
+    set(VULKAN_INCLUDE_DIRS ${Vulkan_INCLUDE_DIR})
+endif()
+
+include_directories(
+    ${CMAKE_CURRENT_SOURCE_DIR}/Backend/include
+    ${VULKAN_INCLUDE_DIRS}
+)
+
+if(WIN32 AND NOT APPLE)
+    set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
+endif()
+
+file(GLOB_RECURSE BACKEND_SOURCES "Backend/src/*.cpp" "Backend/src/*.c" "Backend/src/*.cc")
+if(NOT BACKEND_SOURCES)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/backend_stub.cpp "void quartz_backend_stub() {}\n")
+    set(BACKEND_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/backend_stub.cpp)
+endif()
+add_library(QuartzMetalBackend STATIC ${BACKEND_SOURCES})
+target_link_libraries(QuartzMetalBackend PUBLIC Vulkan::Vulkan)
+
+file(GLOB METAL_SOURCES "Frameworks/Metal.framework/*.m" "Frameworks/Metal.framework/*.mm" "Frameworks/Metal.framework/*.cpp" "Frameworks/Metal.framework/*.c")
+if(NOT METAL_SOURCES)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/metal_stub.cpp "__declspec(dllexport) void quartz_metal_stub() {}\n")
+    set(METAL_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/metal_stub.cpp)
+endif()
+add_library(Metal SHARED ${METAL_SOURCES})
+target_link_libraries(Metal PRIVATE QuartzMetalBackend)
+
+file(GLOB QC_SOURCES "Frameworks/QuartzCore.framework/*.m" "Frameworks/QuartzCore.framework/*.mm" "Frameworks/QuartzCore.framework/*.cpp" "Frameworks/QuartzCore.framework/*.c")
+if(NOT QC_SOURCES)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/qc_stub.cpp "__declspec(dllexport) void quartz_core_stub() {}\n")
+    set(QC_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/qc_stub.cpp)
+endif()
+add_library(QuartzCore SHARED ${QC_SOURCES})
+target_link_libraries(QuartzCore PRIVATE QuartzMetalBackend Metal)
+
+file(GLOB AS_SOURCES "Frameworks/AppServices.framework/*.m" "Frameworks/AppServices.framework/*.mm" "Frameworks/AppServices.framework/*.cpp" "Frameworks/AppServices.framework/*.c")
+if(NOT AS_SOURCES)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/as_stub.cpp "__declspec(dllexport) void app_services_stub() {}\n")
+    set(AS_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/as_stub.cpp)
+endif()
+add_library(AppServices SHARED ${AS_SOURCES})
+target_link_libraries(AppServices PRIVATE QuartzMetalBackend)
+
+file(GLOB AK_SOURCES "Frameworks/AppKit.framework/*.m" "Frameworks/AppKit.framework/*.mm" "Frameworks/AppKit.framework/*.cpp" "Frameworks/AppKit.framework/*.c")
+if(NOT AK_SOURCES)
+    file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/ak_stub.cpp "__declspec(dllexport) void app_kit_stub() {}\n")
+    set(AK_SOURCES ${CMAKE_CURRENT_BINARY_DIR}/ak_stub.cpp)
+endif()
+add_library(AppKit SHARED ${AK_SOURCES})
+target_link_libraries(AppKit PRIVATE QuartzMetalBackend Metal QuartzCore AppServices)
+
+add_dependencies(QuartzCore Metal)
+add_dependencies(AppKit QuartzCore Metal AppServices)
+
+file(GLOB_RECURSE DEMO_SOURCES "Demos/*.m" "Demos/*.mm" "Demos/*.cpp" "Demos/*.c")
+if(DEMO_SOURCES)
+    add_executable(DemoApp ${DEMO_SOURCES})
+    target_link_libraries(DemoApp PRIVATE AppKit QuartzCore Metal AppServices QuartzMetalBackend)
+    if(APPLE)
+        set_target_properties(DemoApp PROPERTIES MACOSX_BUNDLE TRUE)
+    endif()
+endif()
+
+if(APPLE OR NOT WIN32)
+    set_target_properties(Metal PROPERTIES FRAMEWORK TRUE MACOSX_FRAMEWORK_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/Metal.framework/Info.plist PUBLIC_HEADER "Frameworks/Metal.framework/Headers/Metal.h")
+    set_target_properties(QuartzCore PROPERTIES FRAMEWORK TRUE MACOSX_FRAMEWORK_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/QuartzCore.framework/Info.plist PUBLIC_HEADER "Frameworks/QuartzCore.framework/Headers/QuartzCore.h")
+    set_target_properties(AppServices PROPERTIES FRAMEWORK TRUE MACOSX_FRAMEWORK_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppServices.framework/Info.plist PUBLIC_HEADER "Frameworks/AppServices.framework/Headers/AppServices.h")
+    set_target_properties(AppKit PROPERTIES FRAMEWORK TRUE MACOSX_FRAMEWORK_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppKit.framework/Info.plist PUBLIC_HEADER "Frameworks/AppKit.framework/Headers/AppKit.h")
+else()
+    set_target_properties(Metal PROPERTIES LINKER_LANGUAGE CXX PREFIX "" OUTPUT_NAME "Metal")
+    set_target_properties(QuartzCore PROPERTIES LINKER_LANGUAGE CXX PREFIX "" OUTPUT_NAME "QuartzCore")
+    set_target_properties(AppServices PROPERTIES LINKER_LANGUAGE CXX PREFIX "" OUTPUT_NAME "AppServices")
+    set_target_properties(AppKit PROPERTIES LINKER_LANGUAGE CXX PREFIX "" OUTPUT_NAME "AppKit")
+    
+    add_custom_command(TARGET Metal POST_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:Metal>/Headers COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/Metal.framework/Headers/Metal.h $<TARGET_FILE_DIR:Metal>/Headers/Metal.h COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/Metal.framework/Info.plist $<TARGET_FILE_DIR:Metal>/Info.plist)
+    add_custom_command(TARGET QuartzCore POST_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:QuartzCore>/Headers COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/QuartzCore.framework/Headers/QuartzCore.h $<TARGET_FILE_DIR:QuartzCore>/Headers/QuartzCore.h COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/QuartzCore.framework/Info.plist $<TARGET_FILE_DIR:QuartzCore>/Info.plist)
+    add_custom_command(TARGET AppServices POST_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:AppServices>/Headers COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppServices.framework/Headers/AppServices.h $<TARGET_FILE_DIR:AppServices>/Headers/AppServices.h COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppServices.framework/Info.plist $<TARGET_FILE_DIR:AppServices>/Info.plist)
+    add_custom_command(TARGET AppKit POST_BUILD COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:AppKit>/Headers COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppKit.framework/Headers/AppKit.h $<TARGET_FILE_DIR:AppKit>/Headers/AppKit.h COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppKit.framework/Info.plist $<TARGET_FILE_DIR:AppKit>/Info.plist)
+endif()
