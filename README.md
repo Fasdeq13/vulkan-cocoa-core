@@ -1,9 +1,10 @@
-# darling-vulkan-cocoa
+# darling-vulkan-cocoa (QuartzMetal Pipeline)
 
-**darling-vulkan-cocoa** is a compact library designed to translate Apple’s Cocoa interfaces into Linux graphics using the Vulkan API. The project has a minimal layout and consists of just a few core components.
+**darling-vulkan-cocoa** is a high-performance hardware-accelerated graphics pipeline designed to implement and redirect Apple’s Cocoa and Metal 3 interfaces into native Vulkan API calls. 
 
-### Project Structure and Files
+The framework is highly optimized for Darwin-based operating systems (such as ravynOS and XNU development builds) and cross-platform POSIX environments, allowing software to leverage modern discrete GPU power (NVIDIA/AMD/Intel) at max refresh rates without interface micro-stutters.
 
-* **`Frameworks/`** — translates high-level Mac UI functions (AppKit/CoreAnimation) into abstract graphic layers and render commands.
-* **`Backend/`** — translates these layers directly into native Vulkan API calls for hardware-accelerated rendering on Linux.
-* **`CMakeLists.txt`** — translates the project's source code into buildable binaries and libraries using the CMake build system.
+### Project Structure & Components
+
+* **`Frameworks/`** — Core implementation of high-level Apple system фреймворков (`AppKit`, `Metal`, `QuartzCore`, `AppServices`). It handles standard objective-C lifecycles, windows (`NSWindow`), and CoreAnimation layers (`CALayer`).
+* **`Backend/`** — A low-level C++ execution engine that maps layout structures directly to physical Vulkan devices, managing dedicated VRAM heaps and handling on-the-fly JIT compilation (AIR to SPIR-V).
