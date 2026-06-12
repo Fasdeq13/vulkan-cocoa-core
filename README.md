@@ -2,7 +2,7 @@
 
 **darling-vulkan-cocoa** is a high-performance hardware-accelerated graphics pipeline designed to implement and redirect Apple’s Cocoa and Metal 3 interfaces into native Vulkan API calls. 
 
-The framework is highly optimized for Darwin-based operating systems (such as ravynOS and XNU development builds) and cross-platform POSIX environments, allowing software to leverage modern discrete GPU power (NVIDIA/AMD/Intel) at max refresh rates without interface micro-stutters.
+The framework is highly optimized for Darwin-based operating systems and cross-platform POSIX environments, allowing software to leverage modern discrete GPU power (NVIDIA/AMD/Intel) at max refresh rates without interface micro-stutters.
 
 ### Project Structure & Components
 
