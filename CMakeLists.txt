@@ -1,9 +1,12 @@
 cmake_minimum_required(VERSION 3.19)
 project(QuartzMetalVulkan LANGUAGES C CXX)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
 if(NOT WIN32)
     find_package(Vulkan REQUIRED)
+    find_package(LLVM REQUIRED CONFIG)
 else()
     if(DEFINED ENV{VULKAN_SDK})
         set(Vulkan_INCLUDE_DIR "$ENV{VULKAN_SDK}/Include")
@@ -19,6 +22,7 @@ else()
     set_target_properties(Vulkan::Vulkan PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${Vulkan_INCLUDE_DIR}" INTERFACE_LINK_LIBRARIES "${Vulkan_LIBRARY}")
     set(VULKAN_INCLUDE_DIRS ${Vulkan_INCLUDE_DIR})
 endif()
+
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/Backend/include
     ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/Metal.framework/Headers
@@ -26,29 +30,42 @@ include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppServices.framework/Headers
     ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/AppKit.framework/Headers
     ${VULKAN_INCLUDE_DIRS}
+    ${LLVM_INCLUDE_DIRS}
 )
+
+add_definitions(${LLVM_DEFINITIONS})
+
 if(WIN32 AND NOT APPLE)
     set(CMAKE_WINDOWS_EXPORT_ALL_SYMBOLS ON)
 endif()
+
 file(GLOB_RECURSE BACKEND_SOURCES "Backend/src/*.cpp" "Backend/src/*.c" "Backend/src/*.cc")
 add_library(QuartzMetalBackend SHARED ${BACKEND_SOURCES})
-target_link_libraries(QuartzMetalBackend PUBLIC Vulkan::Vulkan)
+
 if(NOT WIN32)
-    target_link_libraries(QuartzMetalBackend PUBLIC objc)
+    target_link_libraries(QuartzMetalBackend PUBLIC Vulkan::Vulkan objc LLVM LLVMSPIRVLib)
+else()
+    target_link_libraries(QuartzMetalBackend PUBLIC Vulkan::Vulkan)
 endif()
+
 add_library(Metal INTERFACE)
 target_link_libraries(Metal INTERFACE QuartzMetalBackend)
+
 add_library(QuartzCore INTERFACE)
 target_link_libraries(QuartzCore INTERFACE QuartzMetalBackend Metal)
+
 add_library(AppServices INTERFACE)
 target_link_libraries(AppServices INTERFACE QuartzMetalBackend)
+
 add_library(AppKit INTERFACE)
 target_link_libraries(AppKit INTERFACE QuartzMetalBackend Metal QuartzCore AppServices)
+
 file(GLOB_RECURSE DEMO_SOURCES "Demos/*.m" "Demos/*.mm" "Demos/*.cpp" "Demos/*.c")
 if(DEMO_SOURCES)
     add_executable(DemoApp ${DEMO_SOURCES})
     target_link_libraries(DemoApp PRIVATE QuartzMetalBackend)
 endif()
+
 add_custom_command(TARGET QuartzMetalBackend POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:QuartzMetalBackend>/Metal.framework/Headers
     COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/Frameworks/Metal.framework/Headers/Metal.h $<TARGET_FILE_DIR:QuartzMetalBackend>/Metal.framework/Headers/Metal.h
