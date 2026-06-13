@@ -2,8 +2,7 @@
 
 **vulkan-cocoa-core** is a high-performance, hardware-independent graphics pipeline bridge designed to translate and redirect Apple’s Cocoa, CoreAnimation, and Metal 3 interfaces directly into native Vulkan 1.3 API calls at the Darwin/XNU kernel level.
 
-The project is architected as a monolithic system backend that replaces the proprietary Apple WindowServer on standard PC hardware. It provides professional creative software (Adobe Photoshop, Premiere Pro, Final Cut Pro) and heavy multi-process web browsers (Chromium / Google Chrome) with direct access to physical GPU power (NVIDIA, AMD, Intel) at maximum display refresh rates without interface micro-stutters.
-
+The project is architected as a monolithic system backend that replaces the proprietary Apple WindowServer on standard PC hardware.
 ## Key Technological Systems
 
 * **Hardware-Independent Swapchain:** A dynamic video memory manager that automatically handles discrete and integrated GPUs. It allocates rendering buffers directly into high-speed `DEVICE_LOCAL` VRAM and leverages dedicated Vulkan queues for graphics and asynchronous data transfers, ensuring smooth 4K video streams and stutter-free playback.
