@@ -1,5 +1,4 @@
 
-// ---------- Standard / System ------------------------------------------------
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -15,19 +14,16 @@
 #include <unordered_map>
 #include <vector>
 
-// ---------- Darwin / Mach kernel headers -------------------------------------
-#include <sys/event.h>      // kqueue / kevent
+#include <sys/event.h>     
 #include <sys/types.h>
 #include <mach/mach.h>
 #include <mach/mach_port.h>
 #include <mach/message.h>
 #include <unistd.h>
 
-// ---------- Vulkan ------------------------------------------------------------
 #include <vulkan/vulkan.h>
 
-// ravynOS exposes its own WSI surface extension instead of xcb/wayland/win32.
-// The extension string mirrors the Darling display server contract.
+
 #ifndef VK_RAVYNOS_surface
 #  define VK_RAVYNOS_SURFACE_EXTENSION_NAME "VK_EXT_headless_surface"
 #endif
@@ -36,7 +32,6 @@
 #include <objc/message.h>
 #include <objc/runtime.h>
 
-// ---------- LLVM / SPIRV-translator ------------------------------------------
 #include <LLVMSPIRVLib/LLVMSPIRVLib.h>
 #include <llvm/Bitcode/BitcodeReader.h>
 #include <llvm/IR/Constants.h>
@@ -50,19 +45,13 @@
 // ---------- Project headers --------------------------------------------------
 #include "QuartzMetalBackend.h"
 
-// =============================================================================
-// §0  Forward declarations / helpers
-// =============================================================================
+
 
 extern "C" id objc_msgSend(id self, SEL op, ...);
 
-// Thin wrapper: Mach port wrappers live in ravynOS libSystem.
 extern "C" kern_return_t mach_port_allocate(ipc_space_t, mach_port_right_t, mach_port_name_t*);
 extern "C" kern_return_t mach_port_destroy(ipc_space_t, mach_port_name_t);
 
-// =============================================================================
-// §1  GPU vendor classification
-// =============================================================================
 
 enum class GPUVendor { Intel, NVIDIA, AMD, Unknown };
 
@@ -75,9 +64,6 @@ static GPUVendor classifyVendor(uint32_t vendorID) {
     }
 }
 
-// =============================================================================
-// §2  Memory helpers
-// =============================================================================
 
 static uint32_t findMemoryType(VkPhysicalDevice gpu,
                                uint32_t           typeBits,
@@ -86,23 +72,17 @@ static uint32_t findMemoryType(VkPhysicalDevice gpu,
     VkPhysicalDeviceMemoryProperties memProps;
     vkGetPhysicalDeviceMemoryProperties(gpu, &memProps);
 
-    // First pass: exact match
     for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
         if ((typeBits & (1u << i)) &&
             (memProps.memoryTypes[i].propertyFlags & props) == props)
             return i;
 
-    // Second pass: any matching type bit (fallback)
     for (uint32_t i = 0; i < memProps.memoryTypeCount; i++)
         if (typeBits & (1u << i))
             return i;
 
     throw std::runtime_error("[QMB] No suitable Vulkan memory type found");
 }
-
-// =============================================================================
-// §3  Texture bridge (Metal ↔ Vulkan shared state)
-// =============================================================================
 
 struct QuartzMetalTextureBridge {
     id            metalTextureObject = nullptr;
@@ -115,11 +95,7 @@ struct QuartzMetalTextureBridge {
     size_t        cpuPixelBufferSize = 0;
 };
 
-// =============================================================================
-// §4  CoreGraphics pixel-buffer pool (Swapchain → VkImage copy path)
-// =============================================================================
 
-// Global CG context table: CGContextRef → pixel buffer
 static std::mutex                                    g_cgMutex;
 static std::unordered_map<uintptr_t, std::vector<uint8_t>> g_cgPixelBuffers;
 
@@ -137,10 +113,6 @@ static std::vector<uint8_t>* cg_get_buffer(CGContextRef ctx) {
     return (it != g_cgPixelBuffers.end()) ? &it->second : nullptr;
 }
 
-// =============================================================================
-// §5  Swapchain state (per-display)
-// =============================================================================
-
 struct QuartzSwapchain {
     VkSwapchainKHR     swapchain      = VK_NULL_HANDLE;
     VkSurfaceKHR       surface        = VK_NULL_HANDLE;
@@ -155,12 +127,8 @@ struct QuartzSwapchain {
     VkFence            inFlight       = VK_NULL_HANDLE;
 };
 
-// Global single swapchain for the primary display
 static QuartzSwapchain g_swapchain;
 
-// =============================================================================
-// §6  VulkanRenderContext — full implementation
-// =============================================================================
 
 VulkanRenderContext::VulkanRenderContext()
     : instance(VK_NULL_HANDLE),
@@ -171,7 +139,6 @@ VulkanRenderContext::VulkanRenderContext()
 {}
 
 VulkanRenderContext::~VulkanRenderContext() {
-    // Destroy swapchain resources
     if (g_swapchain.inFlight       != VK_NULL_HANDLE) vkDestroyFence(device, g_swapchain.inFlight, nullptr);
     if (g_swapchain.renderFinished != VK_NULL_HANDLE) vkDestroySemaphore(device, g_swapchain.renderFinished, nullptr);
     if (g_swapchain.imageAvailable != VK_NULL_HANDLE) vkDestroySemaphore(device, g_swapchain.imageAvailable, nullptr);
@@ -183,7 +150,6 @@ VulkanRenderContext::~VulkanRenderContext() {
     if (instance != VK_NULL_HANDLE) vkDestroyInstance(instance, nullptr);
 }
 
-// ── §6.1  Physical device selection ─────────────────────────────────────────
 
 void VulkanRenderContext::selectPhysicalDevice() {
     uint32_t count = 0;
@@ -193,7 +159,6 @@ void VulkanRenderContext::selectPhysicalDevice() {
     std::vector<VkPhysicalDevice> devs(count);
     vkEnumeratePhysicalDevices(instance, &count, devs.data());
 
-    // Prefer discrete GPU; fall back to first available
     physicalDevice = devs[0];
     for (const auto& d : devs) {
         VkPhysicalDeviceProperties p;
@@ -222,7 +187,6 @@ void VulkanRenderContext::selectPhysicalDevice() {
               << " | Vendor: " << vendorName << "\n";
 }
 
-// ── §6.2  Logical device + Vulkan 1.3 features ───────────────────────────────
 
 void VulkanRenderContext::createLogicalDevice() {
     // Find graphics queue
@@ -248,21 +212,19 @@ void VulkanRenderContext::createLogicalDevice() {
     queueCI.queueCount       = 1;
     queueCI.pQueuePriorities = &priority;
 
-    // Enumerate and request useful extensions
     uint32_t extCount = 0;
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, nullptr);
     std::vector<VkExtensionProperties> availExts(extCount);
     vkEnumerateDeviceExtensionProperties(physicalDevice, nullptr, &extCount, availExts.data());
 
-    // Extensions we want
     const std::vector<const char*> wantedExts = {
-        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,      // Bindless
-        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,    // BDA (Argument Buffers)
-        VK_KHR_SWAPCHAIN_EXTENSION_NAME,                // Swapchain
-        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,        // Vulkan 1.3 dynamic rendering
-        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,        // VK_KHR_sync2
-        VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,      // Photoshop compute atomics
-        "VK_KHR_portability_subset",                    // MoltenVK / ravynOS compat
+        VK_EXT_DESCRIPTOR_INDEXING_EXTENSION_NAME,      
+        VK_KHR_BUFFER_DEVICE_ADDRESS_EXTENSION_NAME,    
+        VK_KHR_SWAPCHAIN_EXTENSION_NAME,              
+        VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,        
+        VK_KHR_SYNCHRONIZATION_2_EXTENSION_NAME,        
+        VK_EXT_SHADER_ATOMIC_FLOAT_EXTENSION_NAME,      
+        "VK_KHR_portability_subset",                    
     };
 
     std::vector<const char*> enabledExts;
@@ -275,7 +237,6 @@ void VulkanRenderContext::createLogicalDevice() {
         }
     }
 
-    // Feature chain: Vulkan 1.3 + Descriptor Indexing + BDA + Dynamic Rendering
     VkPhysicalDeviceVulkan13Features vk13Features{};
     vk13Features.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
     vk13Features.dynamicRendering = VK_TRUE;
@@ -308,7 +269,6 @@ void VulkanRenderContext::createLogicalDevice() {
     deviceCI.pQueueCreateInfos       = &queueCI;
     deviceCI.enabledExtensionCount   = static_cast<uint32_t>(enabledExts.size());
     deviceCI.ppEnabledExtensionNames = enabledExts.data();
-    // pEnabledFeatures must be NULL when pNext feature chain is used
     deviceCI.pEnabledFeatures        = nullptr;
 
     if (vkCreateDevice(physicalDevice, &deviceCI, nullptr, &device) != VK_SUCCESS)
@@ -318,7 +278,6 @@ void VulkanRenderContext::createLogicalDevice() {
     std::cout << "[QMB] Logical device created with " << enabledExts.size() << " extensions\n";
 }
 
-// ── §6.3  WSI Surface + Swapchain (ravynOS headless/native path) ──────────────
 
 static void createSwapchain(VkInstance       instance,
                             VkPhysicalDevice physDev,
@@ -327,9 +286,7 @@ static void createSwapchain(VkInstance       instance,
                             uint32_t         width,
                             uint32_t         height)
 {
-    // ravynOS display server provides a native surface via its libravynDisplay.
-    // We fall back to a headless surface when the display server surface creator
-    // is not yet linked, allowing the rest of the stack to function.
+
     VkHeadlessSurfaceCreateInfoEXT hsCI{};
     hsCI.sType = VK_STRUCTURE_TYPE_HEADLESS_SURFACE_CREATE_INFO_EXT;
 
@@ -346,7 +303,6 @@ static void createSwapchain(VkInstance       instance,
     if (vkCreateHeadlessSurfaceEXT_fn(instance, &hsCI, nullptr, &g_swapchain.surface) != VK_SUCCESS)
         throw std::runtime_error("[QMB] vkCreateHeadlessSurfaceEXT failed");
 
-    // Swapchain
     VkSurfaceCapabilitiesKHR surfCaps;
     vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physDev, g_swapchain.surface, &surfCaps);
 
@@ -367,7 +323,7 @@ static void createSwapchain(VkInstance       instance,
     VkSwapchainCreateInfoKHR scCI{};
     scCI.sType            = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     scCI.surface          = g_swapchain.surface;
-    scCI.minImageCount    = 3; // Triple-buffer for FCP/Premiere
+    scCI.minImageCount    = 3; 
     scCI.imageFormat      = chosen.format;
     scCI.imageColorSpace  = chosen.colorSpace;
     scCI.imageExtent      = { g_swapchain.width, g_swapchain.height };
@@ -376,19 +332,17 @@ static void createSwapchain(VkInstance       instance,
     scCI.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     scCI.preTransform     = surfCaps.currentTransform;
     scCI.compositeAlpha   = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
-    scCI.presentMode      = VK_PRESENT_MODE_MAILBOX_KHR; // No vsync tearing
+    scCI.presentMode      = VK_PRESENT_MODE_MAILBOX_KHR;
     scCI.clipped          = VK_TRUE;
 
     if (vkCreateSwapchainKHR(device, &scCI, nullptr, &g_swapchain.swapchain) != VK_SUCCESS)
         throw std::runtime_error("[QMB] vkCreateSwapchainKHR failed");
 
-    // Retrieve swapchain images
     uint32_t imgCount = 0;
     vkGetSwapchainImagesKHR(device, g_swapchain.swapchain, &imgCount, nullptr);
     g_swapchain.images.resize(imgCount);
     vkGetSwapchainImagesKHR(device, g_swapchain.swapchain, &imgCount, g_swapchain.images.data());
 
-    // Create image views
     g_swapchain.views.resize(imgCount);
     for (uint32_t i = 0; i < imgCount; i++) {
         VkImageViewCreateInfo ivCI{};
@@ -416,7 +370,6 @@ static void createSwapchain(VkInstance       instance,
               << g_swapchain.height << " × " << imgCount << " images\n";
 }
 
-// ── §6.4  Vendor-aware memory allocation ─────────────────────────────────────
 
 VkDeviceMemory VulkanRenderContext::allocateVideoMemory(VkBuffer buffer,
                                                         VkMemoryPropertyFlags props)
@@ -426,7 +379,6 @@ VkDeviceMemory VulkanRenderContext::allocateVideoMemory(VkBuffer buffer,
 
     GPUVendor vendor = classifyVendor(caps.vendorID);
 
-    // Intel UMA: skip staging — map directly
     if (vendor == GPUVendor::Intel &&
         !(props & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT))
         props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
@@ -464,10 +416,7 @@ VkDeviceMemory VulkanRenderContext::allocateImageMemory(VkImage image,
     return mem;
 }
 
-// ── §6.5  Vendor-aware staging helper (NVIDIA/AMD path) ──────────────────────
 
-// Uploads CPU pixel data into a VkImage via a staging buffer.
-// Intel: maps directly (no staging needed — caller should use HOST_COHERENT mem).
 void VulkanRenderContext::uploadPixelsToVkImage(VkImage       dstImage,
                                                 VkCommandPool cmdPool,
                                                 const void*   srcPixels,
@@ -478,18 +427,14 @@ void VulkanRenderContext::uploadPixelsToVkImage(VkImage       dstImage,
     GPUVendor vendor = classifyVendor(caps.vendorID);
 
     if (vendor == GPUVendor::Intel) {
-        // Intel UMA: image memory is HOST_VISIBLE — map and memcpy directly
         VkMemoryRequirements req;
         vkGetImageMemoryRequirements(device, dstImage, &req);
 
-        // NOTE: In the real implementation the caller already allocated the image
-        // with HOST_VISIBLE | HOST_COHERENT; we just map it.
-        // This branch is a hint to the rest of the stack.
+
         std::cout << "[QMB][Intel UMA] Direct pixel map — no staging buffer\n";
         return;
     }
 
-    // NVIDIA / AMD: DEVICE_LOCAL image + staging buffer
     VkBufferCreateInfo stagingCI{};
     stagingCI.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
     stagingCI.size  = byteSize;
@@ -507,7 +452,6 @@ void VulkanRenderContext::uploadPixelsToVkImage(VkImage       dstImage,
     std::memcpy(mapped, srcPixels, static_cast<size_t>(byteSize));
     vkUnmapMemory(device, stagingMem);
 
-    // One-shot command buffer
     VkCommandBufferAllocateInfo cbAI{};
     cbAI.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     cbAI.commandPool        = cmdPool;
@@ -522,7 +466,6 @@ void VulkanRenderContext::uploadPixelsToVkImage(VkImage       dstImage,
     beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cb, &beginInfo);
 
-    // Transition: UNDEFINED → TRANSFER_DST_OPTIMAL
     VkImageMemoryBarrier barrier{};
     barrier.sType                           = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
     barrier.oldLayout                       = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -569,7 +512,6 @@ void VulkanRenderContext::uploadPixelsToVkImage(VkImage       dstImage,
     vkFreeMemory(device, stagingMem, nullptr);
 }
 
-// ── §6.6  initContext — top-level entry point ─────────────────────────────────
 
 void VulkanRenderContext::initContext() {
     // --- Instance ---
@@ -584,7 +526,7 @@ void VulkanRenderContext::initContext() {
     // Instance extensions
     const std::vector<const char*> instanceExts = {
         VK_KHR_SURFACE_EXTENSION_NAME,
-        VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME, // ravynOS WSI
+        VK_EXT_HEADLESS_SURFACE_EXTENSION_NAME, 
         VK_EXT_DEBUG_UTILS_EXTENSION_NAME,
     };
 
@@ -610,17 +552,7 @@ void VulkanRenderContext::initContext() {
               << caps.deviceName << "\n";
 }
 
-// =============================================================================
-// §7  Event loop — kqueue / Mach port driven (Darwin kernel)
-// =============================================================================
-//
-// ravynOS runs a Darwin XNU kernel.  Window events from the display server
-// arrive as Mach messages on a dedicated port.  We use kqueue to wait on
-// both the Mach port (EVFILT_MACHPORT) and a timerfd-equivalent
-// (EVFILT_TIMER) to drive frame pacing without a busy-spin.
-// =============================================================================
 
-// Represents a single decoded window event (move, click, key, redraw)
 struct RavynOSEvent {
     enum class Type { None, MouseMove, MouseDown, MouseUp, KeyDown, KeyUp, WindowRedraw, Quit };
     Type     type   = Type::None;
@@ -780,12 +712,7 @@ static void runDarwinEventLoop(VulkanRenderContext* ctx) {
     std::cout << "[QMB] Darwin event loop exited cleanly\n";
 }
 
-// =============================================================================
-// §8  AIRToSPIRVCompiler — Compute JIT with threadgroup→shared mapping
-//     and Bindless descriptor injection
-// =============================================================================
 
-// ── §8.1  threadgroup barrier → Vulkan ControlBarrier ────────────────────────
 
 static void transformAppleMemoryBarriers(llvm::Module* M) {
     llvm::LLVMContext& ctx = M->getContext();
@@ -816,7 +743,6 @@ static void transformAppleMemoryBarriers(llvm::Module* M) {
                     if (!callee) continue;
                     llvm::StringRef name = callee->getName();
 
-                    // Metal barriers: air.threadgroup_barrier, air.mem_barrier, etc.
                     if (name.starts_with("air.threadgroup_barrier") ||
                         name.starts_with("air.mem_barrier") ||
                         name.starts_with("air.simdgroup_barrier"))
@@ -838,21 +764,16 @@ static void transformAppleMemoryBarriers(llvm::Module* M) {
     for (auto* ci : toErase) ci->eraseFromParent();
 }
 
-// ── §8.2  threadgroup address-space → Vulkan Shared (local) memory ───────────
 
 static void transformThreadgroupAddressSpace(llvm::Module* M) {
-    // Metal threadgroup memory lives in address space 3 (same number as Vulkan
-    // Workgroup storage class in SPIRV).  Ensure all alloca/global in AS3 are
-    // correctly annotated for LLVMSPIRVLib translation.
+
     for (auto& G : M->globals()) {
         if (G.getAddressSpace() == 3) {
-            // Mark as SPIRV workgroup storage — LLVMSPIRVLib picks this up
             G.addAttribute(llvm::Attribute::get(M->getContext(), "spirv.storageClass", "3"));
         }
     }
 }
 
-// ── §8.3  Bindless / Argument Buffer descriptor injection ────────────────────
 
 static void injectBindlessDescriptors(llvm::Module* M,
                                       llvm::NamedMDNode* stageNode,
@@ -864,10 +785,7 @@ static void injectBindlessDescriptors(llvm::Module* M,
     llvm::NamedMDNode* spirvDecorate =
         M->getOrInsertNamedMetadata("spirv.Decorate");
 
-    // Descriptor set mapping:
-    //   vertex stage   → set 0
-    //   fragment stage → set 1
-    //   kernel (compute) stage → set 2
+
     uint32_t descSet = (stageName == "air.vertex")   ? 0 :
                        (stageName == "air.fragment")  ? 1 : 2;
 
@@ -919,7 +837,6 @@ static void injectBindlessDescriptors(llvm::Module* M,
     }
 }
 
-// ── §8.4  Apple intrinsic name remapping ─────────────────────────────────────
 
 static void processAppleIntrinsics(llvm::Module* M) {
     static const std::vector<std::pair<std::string,std::string>> kIntrinsicMap = {
@@ -960,7 +877,6 @@ static void processAppleIntrinsics(llvm::Module* M) {
     }
 }
 
-// ── §8.5  Top-level AIR metadata parsing ─────────────────────────────────────
 
 static void parseAppleMetalMetadata(llvm::Module* M) {
     llvm::LLVMContext& ctx = M->getContext();
@@ -994,14 +910,12 @@ static void parseAppleMetalMetadata(llvm::Module* M) {
         caps->addOperand(llvm::MDNode::get(ctx, capArg));
     }
 
-    // Inject bindless descriptors for each shader stage
     for (const char* stage : { "air.vertex", "air.fragment", "air.kernel" }) {
         auto* node = M->getNamedMetadata(stage);
         if (node) injectBindlessDescriptors(M, node, stage);
     }
 }
 
-// ── §8.6  Main compile entry point ───────────────────────────────────────────
 
 bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airBytecode,
                                             std::vector<uint32_t>&      outSpirv)
@@ -1024,13 +938,11 @@ bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airByteco
     }
     std::unique_ptr<llvm::Module> M = std::move(modOrErr.get());
 
-    // ── Transformation pipeline ──
     parseAppleMetalMetadata(M.get());       // Metadata + bindless descriptors
     transformAppleMemoryBarriers(M.get()); // threadgroup barriers → ControlBarrier
     transformThreadgroupAddressSpace(M.get()); // AS3 → Workgroup shared
     processAppleIntrinsics(M.get());       // air.* → spirv.*
 
-    // ── LLVM IR → SPIR-V via LLVMSPIRVLib ──
     SPIRV::TranslatorOpts opts;
     opts.enableAllExtensions();
     // Allow unknown intrinsics to pass through as SPIR-V OpExtInst
@@ -1053,23 +965,13 @@ bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airByteco
     return true;
 }
 
-// =============================================================================
-// §9  CoreGraphics stubs with real pixel-buffer semantics + Swapchain blit
-// =============================================================================
-//
-//  CGBitmapContextCreate allocates a real RGBA pixel buffer.
-//  CGContextFillRect writes solid pixels into it.
-//  On the next swapchain present, the buffer is uploaded into the current
-//  VkImage via a staging copy (§6.5).
-// =============================================================================
 
-// Internal per-context descriptor
 struct CGContextDescriptor {
     std::vector<uint8_t> pixels;
     size_t width;
     size_t height;
     size_t bytesPerRow;
-    uint32_t fillColor; // ARGB packed
+    uint32_t fillColor; 
 };
 
 static std::mutex                                              g_cgCtxMutex;
@@ -1083,7 +985,6 @@ static CGContextDescriptor* cgctx_get(CGContextRef c) {
 
 extern "C" {
 
-// ── Color spaces ─────────────────────────────────────────────────────────────
 
 CGColorSpaceRef CGColorSpaceCreateDeviceRGB(void)
 { return reinterpret_cast<CGColorSpaceRef>(new uint32_t(1)); }
@@ -1097,7 +998,6 @@ CGColorSpaceRef CGColorSpaceCreateWithName(CFStringRef /*name*/)
 void CGColorSpaceRelease(CGColorSpaceRef space)
 { delete reinterpret_cast<uint32_t*>(space); }
 
-// ── Bitmap context ────────────────────────────────────────────────────────────
 
 CGContextRef CGBitmapContextCreate(void*          data,
                                    size_t         width,
@@ -1189,7 +1089,7 @@ void CGContextFillRect(CGContextRef c, CGRect rect) {
     }
 }
 
-// ── Font / image refs ─────────────────────────────────────────────────────────
+
 
 CGFontRef CGFontCreateWithDataProvider(void* /*provider*/)
 { return reinterpret_cast<CGFontRef>(new uint32_t(0)); }
@@ -1200,7 +1100,6 @@ CGFontRef CGFontCreateWithFontName(CFStringRef /*name*/)
 void CGFontRelease(CGFontRef font)
 { delete reinterpret_cast<uint32_t*>(font); }
 
-// ── NSApplicationMain — wires everything together ─────────────────────────────
 
 int NSApplicationMain(int argc, const char* argv[]) {
     try {
@@ -1213,8 +1112,7 @@ int NSApplicationMain(int argc, const char* argv[]) {
             (id)appClass, sel_registerName("sharedApplication"));
 
         if (appInstance) {
-            // Start the kqueue/Mach event loop on the main thread
-            // (replaces the old while(true) stub)
+
             runDarwinEventLoop(ctx);
         }
         return 0;
@@ -1226,12 +1124,7 @@ int NSApplicationMain(int argc, const char* argv[]) {
 
 } // extern "C"
 
-// =============================================================================
-// §10  ObjC bridge — QuartzMetalDrawable native swapchain binding
-// =============================================================================
 
-// sampleNextDrawableImplementation: returns a QuartzMetalDrawable whose
-// vulkanTextureBridge points at the current VkImage in the global swapchain.
 static id sampleNextDrawableImplementation(id self, SEL /*_cmd*/) {
     Class drawableClass = objc_getClass("QuartzMetalDrawable");
     if (!drawableClass) return nullptr;
@@ -1261,7 +1154,6 @@ static id sampleNextDrawableImplementation(id self, SEL /*_cmd*/) {
     return inst;
 }
 
-// present: copies the CG pixel buffer into the current VkImage, then presents
 static void drawablePresent_impl(id self, SEL /*_cmd*/) {
     Ivar bridgeIvar = class_getInstanceVariable(object_getClass(self), "vulkanTextureBridge");
     if (!bridgeIvar) return;
@@ -1273,7 +1165,6 @@ static void drawablePresent_impl(id self, SEL /*_cmd*/) {
         return;
     }
 
-    // Signal render-finished semaphore so the queue can present
     if (g_swapchain.renderFinished != VK_NULL_HANDLE) {
         VulkanRenderContext* ctx = GetGlobalVulkanContext();
         VkSubmitInfo si{};
@@ -1300,7 +1191,6 @@ static id drawableGetLayer_impl(id self, SEL /*_cmd*/) {
     return iv ? object_getIvar(self, iv) : nullptr;
 }
 
-// NSApplication sharedApplication singleton
 static id sharedApplication_impl(id self, SEL /*_cmd*/) {
     static id instance = nullptr;
     if (!instance)
@@ -1308,26 +1198,22 @@ static id sharedApplication_impl(id self, SEL /*_cmd*/) {
     return instance;
 }
 
-// NSApplication run — delegates to real event loop
 static void run_impl(id self, SEL /*_cmd*/) {
     VulkanRenderContext* ctx = GetGlobalVulkanContext();
     runDarwinEventLoop(ctx);
 }
 
-// NSWindow initializer stub
 static id winInit_func(id self, SEL /*_cmd*/,
                        struct CGRect /*rect*/, unsigned long /*mask*/,
                        unsigned long /*backing*/, bool /*defer*/)
 { return self; }
 
-// NSColorSpace sRGB stub
 static id srgb_func(id self, SEL /*_cmd*/) {
     id cls   = (id)objc_getClass("NSColorSpace");
     id alloc = ((id(*)(id, SEL))objc_msgSend)(cls, sel_registerName("alloc"));
     return    ((id(*)(id, SEL))objc_msgSend)(alloc, sel_registerName("init"));
 }
 
-// NSFont systemFontOfSize stub
 static id sysFont_func(id self, SEL /*_cmd*/, double /*size*/) {
     id cls   = (id)objc_getClass("NSFont");
     id alloc = ((id(*)(id, SEL))objc_msgSend)(cls, sel_registerName("alloc"));
@@ -1338,13 +1224,11 @@ void VulkanRenderContext::buildDynamicObjectiveCBridge() {
     Class nsObject = objc_getClass("NSObject");
     if (!nsObject) return;
 
-    // ── CALayer ──
     if (!objc_getClass("CALayer")) {
         Class c = objc_allocateClassPair(nsObject, "CALayer", 0);
         if (c) objc_registerClassPair(c);
     }
 
-    // ── CAMetalLayer ──
     if (!objc_getClass("CAMetalLayer")) {
         Class base = objc_getClass("CALayer");
         Class c    = objc_allocateClassPair(base, "CAMetalLayer", 0);
@@ -1355,7 +1239,6 @@ void VulkanRenderContext::buildDynamicObjectiveCBridge() {
         }
     }
 
-    // ── QuartzMetalDrawable ──
     if (!objc_getClass("QuartzMetalDrawable")) {
         Class c = objc_allocateClassPair(nsObject, "QuartzMetalDrawable", 0);
         if (c) {
@@ -1370,7 +1253,6 @@ void VulkanRenderContext::buildDynamicObjectiveCBridge() {
         }
     }
 
-    // ── NSApplication ──
     if (!objc_getClass("NSApplication")) {
         Class c    = objc_allocateClassPair(nsObject, "NSApplication", 0);
         if (c) {
@@ -1382,7 +1264,6 @@ void VulkanRenderContext::buildDynamicObjectiveCBridge() {
         }
     }
 
-    // ── NSWindow ──
     if (!objc_getClass("NSWindow")) {
         Class c = objc_allocateClassPair(nsObject, "NSWindow", 0);
         if (c) {
@@ -1393,7 +1274,6 @@ void VulkanRenderContext::buildDynamicObjectiveCBridge() {
         }
     }
 
-    // ── NSColorSpace ──
     if (!objc_getClass("NSColorSpace")) {
         Class c = objc_allocateClassPair(nsObject, "NSColorSpace", 0);
         if (c) {
@@ -1404,7 +1284,6 @@ void VulkanRenderContext::buildDynamicObjectiveCBridge() {
         }
     }
 
-    // ── NSFont ──
     if (!objc_getClass("NSFont")) {
         Class c = objc_allocateClassPair(nsObject, "NSFont", 0);
         if (c) {
@@ -1419,9 +1298,6 @@ void VulkanRenderContext::buildDynamicObjectiveCBridge() {
                  "NSApplication, NSWindow, NSColorSpace, NSFont\n";
 }
 
-// =============================================================================
-// §11  Global context singleton
-// =============================================================================
 
 VulkanRenderContext* GetGlobalVulkanContext() {
     static std::once_flag flag;
