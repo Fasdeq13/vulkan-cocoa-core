@@ -1,10 +1,12 @@
-# darling-vulkan-cocoa (QuartzMetal Pipeline)
+# vulkan-cocoa-core (QMV Core Engine)
 
-**darling-vulkan-cocoa** is a high-performance hardware-accelerated graphics pipeline designed to implement and redirect Apple’s Cocoa and Metal 3 interfaces into native Vulkan API calls. 
+**vulkan-cocoa-core** is a high-performance, hardware-independent graphics pipeline bridge designed to translate and redirect Apple’s Cocoa, CoreAnimation, and Metal 3 interfaces directly into native Vulkan 1.3 API calls at the Darwin/XNU kernel level.
 
-The framework is highly optimized for Darwin-based operating systems and cross-platform POSIX environments, allowing software to leverage modern discrete GPU power (NVIDIA/AMD/Intel) at max refresh rates without interface micro-stutters.
+The project is architected as a monolithic system backend that replaces the proprietary Apple WindowServer on standard PC hardware. It provides professional creative software (Adobe Photoshop, Premiere Pro, Final Cut Pro) and heavy multi-process web browsers (Chromium / Google Chrome) with direct access to physical GPU power (NVIDIA, AMD, Intel) at maximum display refresh rates without interface micro-stutters.
 
-### Project Structure & Components
+## Key Technological Systems
 
-* **`Frameworks/`** — Core implementation of high-level Apple system фреймворков (`AppKit`, `Metal`, `QuartzCore`, `AppServices`). It handles standard objective-C lifecycles, windows (`NSWindow`), and CoreAnimation layers (`CALayer`).
-* **`Backend/`** — A low-level C++ execution engine that maps layout structures directly to physical Vulkan devices, managing dedicated VRAM heaps and handling on-the-fly JIT compilation (AIR to SPIR-V).
+* **Hardware-Independent Swapchain:** A dynamic video memory manager that automatically handles discrete and integrated GPUs. It allocates rendering buffers directly into high-speed `DEVICE_LOCAL` VRAM and leverages dedicated Vulkan queues for graphics and asynchronous data transfers, ensuring smooth 4K video streams and stutter-free playback.
+* **Multi-Process Texture Sharing (IOSurface API):** A native texture-sharing subsystem powered by POSIX shared memory (`shm_open` and `mmap`). It links memory allocation descriptors to Vulkan external handles (`VK_KHR_external_memory_fd`), allowing sandboxed browser renderer processes to stream layout textures directly to the primary GPU compositor process with zero system stalls.
+* **Kqueue/Mach Native Event Loop:** An asynchronous input dispatcher that simultaneously monitors kernel Mach ports and high-resolution frame-rate timers. It extracts hardware mouse coordinates and keyboard signals from incoming kernel messages on the fly, packaging them into standard-compliant `NSEvent` structures via the Objective-C runtime to ensure full UI interactivity.
+* **In-Memory JIT Shader Compiler:** An integrated LLVM-based metadata and MSL intrinsic translator. It intercepts Apple AIR binary bytecode, injects `NonUniformEXT` decorations on the fly to enable bindless Argument Buffers, converts proprietary Apple memory barriers into valid Vulkan control barriers (`ControlBarrier`), and generates clean SPIR-V binaries entirely in system memory.
