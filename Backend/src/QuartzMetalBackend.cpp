@@ -52,6 +52,9 @@ extern "C" id objc_msgSend(id self, SEL op, ...);
 struct Point { double x; double y; };
 struct Size { double w; double h; };
 struct Rect { Point origin; Size size; };
+struct CGPoint { double x; double y; };
+struct CGSize { double w; double h; };
+struct CGRect { CGPoint origin; CGSize size; };
 
 extern "C" {
     typedef struct { void* data; size_t size; int fd; size_t mapped_size; } IOSurfaceObj;
@@ -226,7 +229,6 @@ static void enumerateDisplaysViaDarwin() {
         id screen = objc_msgSend(screens, sel_registerName("objectAtIndex:"), i);
         if (!screen) continue;
 
-        struct CGRect { struct { double x; double y; } origin; struct { double w; double h; } size; };
         CGRect frame;
         typedef CGRect (*FrameFn)(id, SEL);
         FrameFn frameFn = (FrameFn)objc_msgSend;
@@ -484,8 +486,8 @@ static VkSurfaceKHR createDarwinSurface(VkInstance instance, uint32_t monitorInd
 
     MonitorInfo& mon = g_monitors[monitorIndex < g_monitorCount ? monitorIndex : 0];
 
-    struct CGRect { struct { double x; double y; } origin; struct { double w; double h; } size; };
-    CGRect winRect;
+    struct CGRect_local { struct { double x; double y; } origin; struct { double w; double h; } size; };
+    CGRect_local winRect;
     winRect.origin.x = mon.posX;
     winRect.origin.y = mon.posY;
     winRect.size.w   = mon.width;
@@ -997,7 +999,48 @@ bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airByteco
     return true;
 }
 
-static id sharedApplication_impl(id self, SEL) { return self; }
+struct RavynWindowState {
+    mach_port_t machPort;
+    double x, y, w, h;
+    id    metalLayer;
+    char  title[256];
+    bool  isKey;
+    bool  wantsLayer;
+};
+
+static std::unordered_map<uintptr_t, RavynWindowState> g_windowStates;
+static std::mutex g_windowMutex;
+
+static RavynWindowState& getOrCreateWindowState(id self) {
+    std::lock_guard<std::mutex> lk(g_windowMutex);
+    uintptr_t key = (uintptr_t)self;
+    if (g_windowStates.find(key) == g_windowStates.end()) {
+        RavynWindowState ws{};
+        ws.machPort   = MACH_PORT_NULL;
+        ws.x = ws.y   = 0.0;
+        ws.w          = (double)RAVYN_DEFAULT_WIDTH;
+        ws.h          = (double)RAVYN_DEFAULT_HEIGHT;
+        ws.metalLayer = nullptr;
+        ws.isKey      = false;
+        ws.wantsLayer = false;
+        memset(ws.title, 0, sizeof(ws.title));
+        strncpy(ws.title, "ravynOS", sizeof(ws.title) - 1);
+        mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &ws.machPort);
+        g_windowStates[key] = ws;
+    }
+    return g_windowStates[key];
+}
+
+static id g_sharedAppInstance = nullptr;
+
+static id sharedApplication_impl(id self, SEL) {
+    if (!g_sharedAppInstance) {
+        g_sharedAppInstance = self;
+        std::cerr << "[ravynOS] NSApplication sharedApplication: initialized singleton\n";
+    }
+    return g_sharedAppInstance;
+}
+
 static void run_impl(id self, SEL) {
     VulkanRenderContext* ctx = GetGlobalVulkanContext();
     try {
@@ -1010,19 +1053,258 @@ static void run_impl(id self, SEL) {
         std::cerr << "[ravynOS] Fatal: " << e.what() << "\n";
     }
 }
+
 static id winInit_func(id self, SEL, CGRect rect, uint64_t mask, uint64_t backing, bool defer) {
+    RavynWindowState& ws = getOrCreateWindowState(self);
+    ws.x = rect.origin.x;
+    ws.y = rect.origin.y;
+    ws.w = rect.size.w;
+    ws.h = rect.size.h;
+    if (ws.w <= 0.0) ws.w = (double)RAVYN_DEFAULT_WIDTH;
+    if (ws.h <= 0.0) ws.h = (double)RAVYN_DEFAULT_HEIGHT;
+
+    mach_port_t port = MACH_PORT_NULL;
+    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
+    if (kr == KERN_SUCCESS) {
+        mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
+        ws.machPort = port;
+        std::cerr << "[ravynOS] NSWindow init: rect=("
+                  << ws.x << "," << ws.y << ") size=("
+                  << ws.w << "x" << ws.h << ") styleMask=" << mask
+                  << " port=" << port << "\n";
+    } else {
+        std::cerr << "[ravynOS] NSWindow init: mach_port_allocate failed kr=" << kr << "\n";
+    }
     return self;
 }
-static id srgb_func(id self, SEL) { return self; }
-static id sysFont_func(id self, SEL, double size) { return self; }
-static id screens_func(id self, SEL) { return nullptr; }
-static void setTitle_func(id self, SEL, id title) {}
-static void makeKey_func(id self, SEL, id sender) {}
-static void center_func(id self, SEL) {}
-static id contentView_func(id self, SEL) { return self; }
-static void setLayer_func(id self, SEL, id layer) {}
-static void setWantsLayer_func(id self, SEL, bool v) {}
-static id layer_func(id self, SEL) { return self; }
+
+struct RavynColorSpaceState {
+    uint8_t lut[256];
+    bool initialized;
+};
+
+static RavynColorSpaceState g_srgbState = {};
+
+static id srgb_func(id self, SEL) {
+    if (!g_srgbState.initialized) {
+        for (int i = 0; i < 256; ++i) {
+            double v = i / 255.0;
+            double lin = (v <= 0.04045) ? (v / 12.92) : pow((v + 0.055) / 1.055, 2.4);
+            g_srgbState.lut[i] = (uint8_t)(lin * 255.0 + 0.5);
+        }
+        g_srgbState.initialized = true;
+        std::cerr << "[ravynOS] NSColorSpace sRGBColorSpace: linearization LUT initialized\n";
+    }
+    return self;
+}
+
+static id sysFont_func(id self, SEL, double size) {
+    if (size <= 0.0) size = 13.0;
+    struct RavynFontState { double pointSize; uint8_t weight; char family[64]; };
+    RavynFontState* fs = (RavynFontState*)malloc(sizeof(RavynFontState));
+    if (fs) {
+        fs->pointSize = size;
+        fs->weight    = 100;
+        strncpy(fs->family, ".AppleSystemUIFont", sizeof(fs->family) - 1);
+        objc_setAssociatedObject(self, (void*)0xF0NTST4TE,
+            (id)(uintptr_t)fs, OBJC_ASSOCIATION_ASSIGN);
+        std::cerr << "[ravynOS] NSFont systemFontOfSize: size=" << size
+                  << " family=" << fs->family << "\n";
+    }
+    return self;
+}
+
+static id screens_func(id self, SEL) {
+    enumerateDisplaysViaDarwin();
+
+    Class nsArrCls = objc_getClass("NSMutableArray");
+    if (!nsArrCls) {
+        std::cerr << "[ravynOS] NSScreen screens: NSMutableArray not found\n";
+        return nullptr;
+    }
+
+    id array = objc_msgSend((id)nsArrCls, sel_registerName("array"));
+    if (!array) {
+        std::cerr << "[ravynOS] NSScreen screens: array creation failed\n";
+        return nullptr;
+    }
+
+    for (uint32_t i = 0; i < g_monitorCount; ++i) {
+        MonitorInfo& m = g_monitors[i];
+
+        id screenObj = objc_msgSend(
+            objc_msgSend((id)objc_getClass("NSScreen"), sel_registerName("alloc")),
+            sel_registerName("init")
+        );
+        if (!screenObj) continue;
+
+        objc_setAssociatedObject(screenObj, (void*)0x5CR33NW,
+            (id)(uintptr_t)m.width,   OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(screenObj, (void*)0x5CR33NH,
+            (id)(uintptr_t)m.height,  OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(screenObj, (void*)0x5CR33NX,
+            (id)(uintptr_t)(uint64_t)(int64_t)m.posX, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(screenObj, (void*)0x5CR33NY,
+            (id)(uintptr_t)(uint64_t)(int64_t)m.posY, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(screenObj, (void*)0x5CR33NR,
+            (id)(uintptr_t)(uint32_t)(m.refreshRate * 1000.0f), OBJC_ASSOCIATION_ASSIGN);
+
+        objc_msgSend(array, sel_registerName("addObject:"), screenObj);
+
+        std::cerr << "[ravynOS] NSScreen screens: [" << i << "] "
+                  << m.name << " " << m.width << "x" << m.height
+                  << " @(" << m.posX << "," << m.posY << ")"
+                  << (m.isPrimary ? " PRIMARY" : "") << "\n";
+    }
+
+    return array;
+}
+
+static void setTitle_func(id self, SEL, id title) {
+    if (!title) return;
+    const char* utf8 = (const char*)objc_msgSend(title, sel_registerName("UTF8String"));
+    if (!utf8) return;
+
+    RavynWindowState& ws = getOrCreateWindowState(self);
+    strncpy(ws.title, utf8, sizeof(ws.title) - 1);
+    ws.title[sizeof(ws.title) - 1] = '\0';
+
+    if (ws.machPort != MACH_PORT_NULL) {
+        struct TitleMsg { mach_msg_header_t hdr; char text[256]; };
+        TitleMsg msg{};
+        msg.hdr.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+        msg.hdr.msgh_size        = sizeof(msg);
+        msg.hdr.msgh_remote_port = ws.machPort;
+        msg.hdr.msgh_id          = 0x5454;
+        strncpy(msg.text, ws.title, 255);
+        mach_msg(&msg.hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                 sizeof(msg), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+    }
+    std::cerr << "[ravynOS] NSWindow setTitle: \"" << ws.title << "\"\n";
+}
+
+static void makeKey_func(id self, SEL, id sender) {
+    RavynWindowState& ws = getOrCreateWindowState(self);
+    ws.isKey = true;
+
+    if (ws.machPort != MACH_PORT_NULL) {
+        struct FocusMsg { mach_msg_header_t hdr; uint32_t cmd; uint32_t pad; };
+        FocusMsg msg{};
+        msg.hdr.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+        msg.hdr.msgh_size        = sizeof(msg);
+        msg.hdr.msgh_remote_port = ws.machPort;
+        msg.hdr.msgh_id          = 0x4B45;
+        msg.cmd                  = 1;
+        mach_msg(&msg.hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                 sizeof(msg), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+    }
+
+    if (g_sharedAppInstance) {
+        objc_msgSend(g_sharedAppInstance,
+                     sel_registerName("activateIgnoringOtherApps:"), (bool)true);
+    }
+    std::cerr << "[ravynOS] NSWindow makeKeyAndOrderFront: window focused and ordered front\n";
+}
+
+static void center_func(id self, SEL) {
+    RavynWindowState& ws = getOrCreateWindowState(self);
+
+    enumerateDisplaysViaDarwin();
+    MonitorInfo& primary = g_monitors[0];
+
+    double newX = ((double)primary.width  - ws.w) * 0.5 + primary.posX;
+    double newY = ((double)primary.height - ws.h) * 0.5 + primary.posY;
+    ws.x = newX;
+    ws.y = newY;
+
+    if (ws.machPort != MACH_PORT_NULL) {
+        struct MoveMsg { mach_msg_header_t hdr; double x, y, w, h; };
+        MoveMsg msg{};
+        msg.hdr.msgh_bits        = MACH_MSGH_BITS(MACH_MSG_TYPE_COPY_SEND, 0);
+        msg.hdr.msgh_size        = sizeof(msg);
+        msg.hdr.msgh_remote_port = ws.machPort;
+        msg.hdr.msgh_id          = 0x4345;
+        msg.x = newX; msg.y = newY;
+        msg.w = ws.w; msg.h = ws.h;
+        mach_msg(&msg.hdr, MACH_SEND_MSG | MACH_SEND_TIMEOUT,
+                 sizeof(msg), 0, MACH_PORT_NULL, 0, MACH_PORT_NULL);
+    }
+    std::cerr << "[ravynOS] NSWindow center: ("
+              << newX << ", " << newY << ") on "
+              << primary.width << "x" << primary.height << " display\n";
+}
+
+static id contentView_func(id self, SEL) {
+    RavynWindowState& ws = getOrCreateWindowState(self);
+    if (ws.metalLayer) return (id)ws.metalLayer;
+    return self;
+}
+
+static void setLayer_func(id self, SEL, id layer) {
+    if (!layer) {
+        std::cerr << "[ravynOS] NSView setLayer: nil layer, skipping\n";
+        return;
+    }
+    RavynWindowState& ws = getOrCreateWindowState(self);
+    ws.metalLayer = layer;
+
+    id metalLayerClass = (id)objc_getClass("CAMetalLayer");
+    bool isMetalLayer = metalLayerClass &&
+        (bool)objc_msgSend(layer, sel_registerName("isKindOfClass:"), metalLayerClass);
+
+    if (isMetalLayer) {
+        id srgbSpace = objc_msgSend((id)objc_getClass("NSColorSpace"),
+                                     sel_registerName("sRGBColorSpace"));
+        if (srgbSpace)
+            objc_msgSend(layer, sel_registerName("setColorspace:"), srgbSpace);
+
+        objc_msgSend(layer, sel_registerName("setPixelFormat:"), (unsigned long)80);
+        objc_msgSend(layer, sel_registerName("setFramebufferOnly:"), (bool)false);
+
+        if (ws.w > 0.0 && ws.h > 0.0) {
+            CGSize dsz{ ws.w, ws.h };
+            typedef void (*SetSizeFn)(id, SEL, CGSize);
+            ((SetSizeFn)objc_msgSend)(layer, sel_registerName("setDrawableSize:"), dsz);
+        }
+        std::cerr << "[ravynOS] NSView setLayer: CAMetalLayer attached "
+                  << ws.w << "x" << ws.h << "\n";
+    } else {
+        std::cerr << "[ravynOS] NSView setLayer: generic CA layer attached\n";
+    }
+}
+
+static void setWantsLayer_func(id self, SEL, bool v) {
+    RavynWindowState& ws = getOrCreateWindowState(self);
+    ws.wantsLayer = v;
+    if (v && !ws.metalLayer) {
+        id mlCls = (id)objc_getClass("CAMetalLayer");
+        if (mlCls) {
+            id layer = objc_msgSend(mlCls, sel_registerName("layer"));
+            if (layer) {
+                ws.metalLayer = layer;
+                setLayer_func(self, sel_registerName("setLayer:"), layer);
+            }
+        }
+    }
+    std::cerr << "[ravynOS] NSView setWantsLayer: " << (v ? "YES" : "NO") << "\n";
+}
+
+static id layer_func(id self, SEL) {
+    RavynWindowState& ws = getOrCreateWindowState(self);
+    if (ws.metalLayer) return ws.metalLayer;
+
+    id mlCls = (id)objc_getClass("CAMetalLayer");
+    if (mlCls) {
+        id layer = objc_msgSend(mlCls, sel_registerName("layer"));
+        if (layer) {
+            ws.metalLayer = layer;
+            std::cerr << "[ravynOS] NSView layer: CAMetalLayer auto-created\n";
+            return layer;
+        }
+    }
+    std::cerr << "[ravynOS] NSView layer: CAMetalLayer unavailable, returning self\n";
+    return self;
+}
 
 extern "C" {
     int NSApplicationMain(int argc, const char* argv[]) {
