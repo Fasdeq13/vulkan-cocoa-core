@@ -52,9 +52,11 @@ extern "C" id objc_msgSend(id self, SEL op, ...);
 struct Point { double x; double y; };
 struct Size { double w; double h; };
 struct Rect { Point origin; Size size; };
+#ifndef __CGGEOMETRY__
 struct CGPoint { double x; double y; };
-struct CGSize { double w; double h; };
-struct CGRect { CGPoint origin; CGSize size; };
+struct CGSize  { double w; double h; };
+struct CGRect  { CGPoint origin; CGSize size; };
+#endif
 
 extern "C" {
     typedef struct { void* data; size_t size; int fd; size_t mapped_size; } IOSurfaceObj;
@@ -1012,11 +1014,21 @@ static std::unordered_map<uintptr_t, RavynWindowState> g_windowStates;
 static std::mutex g_windowMutex;
 
 static RavynWindowState& getOrCreateWindowState(id self) {
-    std::lock_guard<std::mutex> lk(g_windowMutex);
     uintptr_t key = (uintptr_t)self;
+
+    {
+        std::lock_guard<std::mutex> lk(g_windowMutex);
+        if (g_windowStates.find(key) != g_windowStates.end())
+            return g_windowStates[key];
+    }
+
+    mach_port_t newPort = MACH_PORT_NULL;
+    mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &newPort);
+
+    std::lock_guard<std::mutex> lk(g_windowMutex);
     if (g_windowStates.find(key) == g_windowStates.end()) {
         RavynWindowState ws{};
-        ws.machPort   = MACH_PORT_NULL;
+        ws.machPort   = newPort;
         ws.x = ws.y   = 0.0;
         ws.w          = (double)RAVYN_DEFAULT_WIDTH;
         ws.h          = (double)RAVYN_DEFAULT_HEIGHT;
@@ -1025,8 +1037,10 @@ static RavynWindowState& getOrCreateWindowState(id self) {
         ws.wantsLayer = false;
         memset(ws.title, 0, sizeof(ws.title));
         strncpy(ws.title, "ravynOS", sizeof(ws.title) - 1);
-        mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &ws.machPort);
         g_windowStates[key] = ws;
+    } else {
+        if (newPort != MACH_PORT_NULL)
+            mach_port_deallocate(mach_task_self(), newPort);
     }
     return g_windowStates[key];
 }
@@ -1128,17 +1142,21 @@ static id screens_func(id self, SEL) {
     }
 
     Class nsValCls = objc_getClass("NSValue");
+    if (!nsValCls) {
+        std::cerr << "[ravynOS] NSScreen screens: NSValue not found, cannot wrap monitors\n";
+        return array;
+    }
+
     for (uint32_t i = 0; i < g_monitorCount; ++i) {
         MonitorInfo* m = &g_monitors[i];
 
-        id screenObj = nullptr;
-        if (nsValCls) {
-            screenObj = objc_msgSend((id)nsValCls,
-                sel_registerName("valueWithPointer:"),
-                (const void*)m);
-        }
+        id screenObj = objc_msgSend((id)nsValCls,
+            sel_registerName("valueWithPointer:"),
+            (const void*)m);
+
         if (!screenObj) {
-            screenObj = (id)(uintptr_t)m;
+            std::cerr << "[ravynOS] NSScreen screens: failed to wrap monitor[" << i << "]\n";
+            continue;
         }
 
         objc_msgSend(array, sel_registerName("addObject:"), screenObj);
