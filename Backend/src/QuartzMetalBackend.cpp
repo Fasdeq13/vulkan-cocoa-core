@@ -872,7 +872,7 @@ static void runDarwinEventLoop(VulkanRenderContext* ctx) {
     if (kq < 0) throw std::runtime_error("ravynOS: kqueue() failed");
 
     struct kevent changes[3];
-    EV_SET(&changes[0], 1, EVFILT_TIMER, EV_ADD | EV_ENABLE, NOTE_MSECONDS, 16, nullptr);
+    EV_SET(&changes[0], 1, EVFILT_TIMER, EV_ADD | EV_ENABLE, 0, 16, nullptr);
 
     mach_port_t mousePort = MACH_PORT_NULL, keyPort = MACH_PORT_NULL;
     mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mousePort);
@@ -1063,18 +1063,14 @@ static id winInit_func(id self, SEL, CGRect rect, uint64_t mask, uint64_t backin
     if (ws.w <= 0.0) ws.w = (double)RAVYN_DEFAULT_WIDTH;
     if (ws.h <= 0.0) ws.h = (double)RAVYN_DEFAULT_HEIGHT;
 
-    mach_port_t port = MACH_PORT_NULL;
-    kern_return_t kr = mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &port);
-    if (kr == KERN_SUCCESS) {
-        mach_port_insert_right(mach_task_self(), port, port, MACH_MSG_TYPE_MAKE_SEND);
-        ws.machPort = port;
-        std::cerr << "[ravynOS] NSWindow init: rect=("
-                  << ws.x << "," << ws.y << ") size=("
-                  << ws.w << "x" << ws.h << ") styleMask=" << mask
-                  << " port=" << port << "\n";
-    } else {
-        std::cerr << "[ravynOS] NSWindow init: mach_port_allocate failed kr=" << kr << "\n";
+    if (ws.machPort != MACH_PORT_NULL) {
+        mach_port_insert_right(mach_task_self(), ws.machPort, ws.machPort, MACH_MSG_TYPE_MAKE_SEND);
     }
+
+    std::cerr << "[ravynOS] NSWindow init: rect=("
+              << ws.x << "," << ws.y << ") size=("
+              << ws.w << "x" << ws.h << ") styleMask=" << mask
+              << " port=" << ws.machPort << "\n";
     return self;
 }
 
@@ -1101,15 +1097,17 @@ static id srgb_func(id self, SEL) {
 static id sysFont_func(id self, SEL, double size) {
     if (size <= 0.0) size = 13.0;
     struct RavynFontState { double pointSize; uint8_t weight; char family[64]; };
-    RavynFontState* fs = (RavynFontState*)malloc(sizeof(RavynFontState));
-    if (fs) {
-        fs->pointSize = size;
-        fs->weight    = 100;
-        strncpy(fs->family, ".AppleSystemUIFont", sizeof(fs->family) - 1);
-        objc_setAssociatedObject(self, (void*)0xF0NTST4TE,
-            (id)(uintptr_t)fs, OBJC_ASSOCIATION_ASSIGN);
+    static std::unordered_map<uintptr_t, RavynFontState> s_fontStates;
+    static std::mutex s_fontMutex;
+    {
+        std::lock_guard<std::mutex> lk(s_fontMutex);
+        RavynFontState& fs = s_fontStates[(uintptr_t)self];
+        fs.pointSize = size;
+        fs.weight    = 100;
+        strncpy(fs.family, ".AppleSystemUIFont", sizeof(fs.family) - 1);
+        fs.family[sizeof(fs.family) - 1] = '\0';
         std::cerr << "[ravynOS] NSFont systemFontOfSize: size=" << size
-                  << " family=" << fs->family << "\n";
+                  << " family=" << fs.family << "\n";
     }
     return self;
 }
@@ -1129,32 +1127,26 @@ static id screens_func(id self, SEL) {
         return nullptr;
     }
 
+    Class nsValCls = objc_getClass("NSValue");
     for (uint32_t i = 0; i < g_monitorCount; ++i) {
-        MonitorInfo& m = g_monitors[i];
+        MonitorInfo* m = &g_monitors[i];
 
-        id screenObj = objc_msgSend(
-            objc_msgSend((id)objc_getClass("NSScreen"), sel_registerName("alloc")),
-            sel_registerName("init")
-        );
-        if (!screenObj) continue;
-
-        objc_setAssociatedObject(screenObj, (void*)0x5CR33NW,
-            (id)(uintptr_t)m.width,   OBJC_ASSOCIATION_ASSIGN);
-        objc_setAssociatedObject(screenObj, (void*)0x5CR33NH,
-            (id)(uintptr_t)m.height,  OBJC_ASSOCIATION_ASSIGN);
-        objc_setAssociatedObject(screenObj, (void*)0x5CR33NX,
-            (id)(uintptr_t)(uint64_t)(int64_t)m.posX, OBJC_ASSOCIATION_ASSIGN);
-        objc_setAssociatedObject(screenObj, (void*)0x5CR33NY,
-            (id)(uintptr_t)(uint64_t)(int64_t)m.posY, OBJC_ASSOCIATION_ASSIGN);
-        objc_setAssociatedObject(screenObj, (void*)0x5CR33NR,
-            (id)(uintptr_t)(uint32_t)(m.refreshRate * 1000.0f), OBJC_ASSOCIATION_ASSIGN);
+        id screenObj = nullptr;
+        if (nsValCls) {
+            screenObj = objc_msgSend((id)nsValCls,
+                sel_registerName("valueWithPointer:"),
+                (const void*)m);
+        }
+        if (!screenObj) {
+            screenObj = (id)(uintptr_t)m;
+        }
 
         objc_msgSend(array, sel_registerName("addObject:"), screenObj);
 
         std::cerr << "[ravynOS] NSScreen screens: [" << i << "] "
-                  << m.name << " " << m.width << "x" << m.height
-                  << " @(" << m.posX << "," << m.posY << ")"
-                  << (m.isPrimary ? " PRIMARY" : "") << "\n";
+                  << m->name << " " << m->width << "x" << m->height
+                  << " @(" << m->posX << "," << m->posY << ")"
+                  << (m->isPrimary ? " PRIMARY" : "") << "\n";
     }
 
     return array;
@@ -1274,15 +1266,20 @@ static void setLayer_func(id self, SEL, id layer) {
 }
 
 static void setWantsLayer_func(id self, SEL, bool v) {
-    RavynWindowState& ws = getOrCreateWindowState(self);
-    ws.wantsLayer = v;
-    if (v && !ws.metalLayer) {
-        id mlCls = (id)objc_getClass("CAMetalLayer");
-        if (mlCls) {
-            id layer = objc_msgSend(mlCls, sel_registerName("layer"));
-            if (layer) {
-                ws.metalLayer = layer;
-                setLayer_func(self, sel_registerName("setLayer:"), layer);
+    {
+        RavynWindowState& ws = getOrCreateWindowState(self);
+        ws.wantsLayer = v;
+    }
+    if (v) {
+        RavynWindowState& ws = getOrCreateWindowState(self);
+        if (!ws.metalLayer) {
+            id mlCls = (id)objc_getClass("CAMetalLayer");
+            if (mlCls) {
+                id layer = objc_msgSend(mlCls, sel_registerName("layer"));
+                if (layer) {
+                    ws.metalLayer = layer;
+                    setLayer_func(self, sel_registerName("setLayer:"), layer);
+                }
             }
         }
     }
