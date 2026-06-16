@@ -1,3 +1,11 @@
+// QuartzMetalBackend.cpp
+// ravynOS Quartz/Metal → Vulkan backend
+// Target: Darwin XNU kernel (ravynOS transition from FreeBSD)
+// Date: 16-06-2025
+// IOSurface: Mach port-based, IOKit-compatible (no shm_open stub)
+
+
+
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
