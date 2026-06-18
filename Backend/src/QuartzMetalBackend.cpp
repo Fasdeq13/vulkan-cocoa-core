@@ -65,7 +65,6 @@
 
 #ifdef __x86_64__
 extern "C" id objc_msgSend(id, SEL, ...);
-extern "C" void objc_msgSend_stret(void*, id, SEL, ...);
 #else
 extern "C" id objc_msgSend(id, SEL, ...);
 #endif
@@ -139,13 +138,22 @@ typedef IOSurfaceObj* IOSurfaceRef;
 
 static io_connect_t openIOSurfaceUserClient() {
     CFMutableDictionaryRef matching = IOServiceMatching("IOSurfaceRoot");
-    if (!matching) return IO_OBJECT_NULL;
+    if (!matching) {
+        std::cerr << "[ravynOS IOSurface] IOServiceMatching(IOSurfaceRoot) returned null — sandbox restriction? Using vm_allocate fallback\n";
+        return IO_OBJECT_NULL;
+    }
     io_service_t service = IOServiceGetMatchingService(kIOMainPortDefault, matching);
-    if (service == IO_OBJECT_NULL) return IO_OBJECT_NULL;
+    if (service == IO_OBJECT_NULL) {
+        std::cerr << "[ravynOS IOSurface] IOSurfaceRoot service not found — running in sandbox or on unsupported HW. Using vm_allocate fallback\n";
+        return IO_OBJECT_NULL;
+    }
     io_connect_t conn = IO_OBJECT_NULL;
     kern_return_t kr = IOServiceOpen(service, mach_task_self(), 0, &conn);
     IOObjectRelease(service);
-    if (kr != KERN_SUCCESS) return IO_OBJECT_NULL;
+    if (kr != KERN_SUCCESS) {
+        std::cerr << "[ravynOS IOSurface] IOServiceOpen failed kr=" << kr << " — Using vm_allocate fallback\n";
+        return IO_OBJECT_NULL;
+    }
     return conn;
 }
 
@@ -315,37 +323,40 @@ kern_return_t IOSurfaceUnlock(IOSurfaceRef ref, uint32_t options, uint32_t* seed
 
 } // extern "C"
 
-struct RavynMsgMove {
+struct alignas(8) RavynMsgMove {
     mach_msg_header_t hdr;
     uint32_t msgId;
+    uint32_t _pad0;
     double x, y, w, h;
 };
 
-struct RavynMsgTitle {
+struct alignas(8) RavynMsgTitle {
     mach_msg_header_t hdr;
     uint32_t msgId;
     char text[252];
 };
 
-struct RavynMsgFocus {
+struct alignas(8) RavynMsgFocus {
     mach_msg_header_t hdr;
     uint32_t msgId;
     uint32_t focused;
 };
 
-struct RavynMsgResize {
+struct alignas(8) RavynMsgResize {
     mach_msg_header_t hdr;
     uint32_t msgId;
+    uint32_t _pad0;
     double w, h;
 };
 
-struct RavynMsgSurface {
+struct alignas(8) RavynMsgSurface {
     mach_msg_header_t hdr;
     mach_msg_body_t   body;
     mach_msg_port_descriptor_t surfacePort;
     uint32_t msgId;
     uint32_t width;
     uint32_t height;
+    uint32_t _pad0;
 };
 
 static void ravynSendMsg(mach_port_t port, void* msg, mach_msg_size_t size) {
@@ -416,22 +427,12 @@ static void enumerateDisplaysViaDarwin() {
     if (count == 0) count = 1;
     if (count > RAVYN_MAX_MONITORS) count = RAVYN_MAX_MONITORS;
 
-#ifdef __x86_64__
-    typedef void (*FrameStretFn)(NSRect*, id, SEL);
-    FrameStretFn frameStret = (FrameStretFn)(void*)objc_msgSend_stret;
-#endif
-
     for (NSUInteger i = 0; i < count; ++i) {
         id screen = objc_msgSend(screens, sel_registerName("objectAtIndex:"), i);
         if (!screen) continue;
 
-        NSRect frame{};
-#ifdef __x86_64__
-        frameStret(&frame, screen, sel_registerName("frame"));
-#else
         typedef NSRect (*FrameFn)(id, SEL);
-        frame = ((FrameFn)(void*)objc_msgSend)(screen, sel_registerName("frame"));
-#endif
+        NSRect frame = ((FrameFn)(void*)objc_msgSend)(screen, sel_registerName("frame"));
 
         MonitorInfo& m = g_monitors[g_monitorCount];
         m.width      = frame.size.width  > 0.0 ? (uint32_t)frame.size.width  : RAVYN_DEFAULT_WIDTH;
@@ -805,6 +806,9 @@ void VulkanRenderContext::createSwapchain(VkInstance inst,
     vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surface, &fmtCount, nullptr);
     std::vector<VkSurfaceFormatKHR> formats(fmtCount);
     vkGetPhysicalDeviceSurfaceFormatsKHR(phys, surface, &fmtCount, formats.data());
+
+    if (formats.empty())
+        throw std::runtime_error("[ravynOS] vkGetPhysicalDeviceSurfaceFormatsKHR returned 0 formats — surface or CAMetalLayer is invalid");
 
     VkSurfaceFormatKHR chosen = formats[0];
     for (auto& f : formats)
@@ -1183,9 +1187,10 @@ bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airByteco
                                               std::vector<uint32_t>&       outSpirv) {
     if (airBytecode.empty()) return false;
 
+    static llvm::LLVMContext llvmCtx;
+
     std::string bin(airBytecode.begin(), airBytecode.end());
     llvm::MemoryBufferRef bufRef(bin, "AIR_Stream");
-    llvm::LLVMContext llvmCtx;
 
     auto modOrErr = llvm::parseBitcodeFile(bufRef, llvmCtx);
     if (!modOrErr) {
@@ -1287,9 +1292,20 @@ struct MachKeyPayload {
     uint8_t  _pad[5];
 };
 
-static void runDarwinEventLoop(VulkanRenderContext* ctx) {
+struct RavynEventLoopArgs {
+    VulkanRenderContext* ctx;
+};
+
+static void* ravynEventLoopThread(void* arg) {
+    RavynEventLoopArgs* a = static_cast<RavynEventLoopArgs*>(arg);
+    VulkanRenderContext* ctx = a->ctx;
+    delete a;
+
     int kq = kqueue();
-    if (kq < 0) throw std::runtime_error("[ravynOS] kqueue() failed");
+    if (kq < 0) {
+        std::cerr << "[ravynOS] kqueue() failed in event loop thread\n";
+        return nullptr;
+    }
 
     mach_port_t mousePort = MACH_PORT_NULL, keyPort = MACH_PORT_NULL;
     mach_port_allocate(mach_task_self(), MACH_PORT_RIGHT_RECEIVE, &mousePort);
@@ -1314,7 +1330,7 @@ static void runDarwinEventLoop(VulkanRenderContext* ctx) {
 
     alignas(16) char buffer[4096];
     uint64_t frameCount = 0;
-    std::cerr << "[ravynOS] Darwin event loop @ " << mon0.refreshRate << " Hz\n";
+    std::cerr << "[ravynOS] Darwin event loop thread @ " << mon0.refreshRate << " Hz\n";
 
     while (true) {
         struct kevent ev{};
@@ -1368,6 +1384,20 @@ static void runDarwinEventLoop(VulkanRenderContext* ctx) {
     mach_port_deallocate(mach_task_self(), mousePort);
     mach_port_deallocate(mach_task_self(), keyPort);
     close(kq);
+    return nullptr;
+}
+
+static void runDarwinEventLoop(VulkanRenderContext* ctx) {
+    RavynEventLoopArgs* args = new RavynEventLoopArgs{ ctx };
+    pthread_t tid;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    if (pthread_create(&tid, &attr, ravynEventLoopThread, args) != 0) {
+        delete args;
+        std::cerr << "[ravynOS] pthread_create for event loop failed\n";
+    }
+    pthread_attr_destroy(&attr);
 }
 
 struct RavynWindowState {
@@ -1731,12 +1761,16 @@ static id mainScreen_func(id, SEL _cmd) {
 
 static NSRect screenFrame_func(id self, SEL _cmd) {
     (void)_cmd;
-    for (uint32_t i = 0; i < g_monitorCount; ++i) {
-        if ((const void*)&g_monitors[i] == (const void*)self) {
-            return NSRect{
-                NSPoint{ (double)g_monitors[i].posX, (double)g_monitors[i].posY },
-                NSSize{  (double)g_monitors[i].width, (double)g_monitors[i].height }
-            };
+    typedef void* (*PtrValFn)(id, SEL);
+    void* ptr = ((PtrValFn)(void*)objc_msgSend)(self, sel_registerName("pointerValue"));
+    if (ptr) {
+        for (uint32_t i = 0; i < g_monitorCount; ++i) {
+            if (ptr == (void*)&g_monitors[i]) {
+                return NSRect{
+                    NSPoint{ (double)g_monitors[i].posX, (double)g_monitors[i].posY },
+                    NSSize{  (double)g_monitors[i].width, (double)g_monitors[i].height }
+                };
+            }
         }
     }
     return NSRect{ NSPoint{ 0.0, 0.0 },
@@ -1822,12 +1856,12 @@ int NSApplicationMain(int argc, const char* argv[]) {
                          (IMP)boldFont_func, "@:d");
     });
 
-    safeAddClass("NSScreen", [](Class, Class meta) {
+    safeAddClass("NSScreen", [](Class c, Class meta) {
         class_addMethod(meta, sel_registerName("screens"),
                          (IMP)screens_func, "@@:");
         class_addMethod(meta, sel_registerName("mainScreen"),
                          (IMP)mainScreen_func, "@@:");
-        class_addMethod((Class)class_getSuperclass((Class)meta),
+        class_addMethod(c,
                          sel_registerName("frame"),
                          (IMP)screenFrame_func,
                          "{NSRect={NSPoint=dd}{NSSize=dd}}@:");
