@@ -31,6 +31,7 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <dispatch/dispatch.h>
 
 #include <mach/mach.h>
 #include <mach/mach_port.h>
@@ -97,6 +98,9 @@ static std::atomic<bool>     g_eventLoopShouldStop{false};
 static std::atomic<bool>     g_eventLoopRunning{false};
 static pthread_t             g_eventLoopThreadHandle{};
 static std::atomic<bool>     g_eventLoopThreadValid{false};
+static std::atomic<bool>     g_pendingResize{false};
+static std::atomic<uint32_t> g_pendingResizeW{0};
+static std::atomic<uint32_t> g_pendingResizeH{0};
 
 enum {
     kIOSurfaceMethodCreate         = 0,
@@ -988,6 +992,29 @@ void VulkanRenderContext::recreateSwapchain() {
     std::cerr << "[ravynOS] Swapchain recreated: " << mon.width << "x" << mon.height << "\n";
 }
 
+static void recreateSwapchainForSize(VulkanRenderContext* ctx, uint32_t w, uint32_t h) {
+    if (w == 0 || h == 0) return;
+    vkDeviceWaitIdle(ctx->device);
+
+    for (auto& fb : ctx->framebuffers)
+        if (fb != VK_NULL_HANDLE) { vkDestroyFramebuffer(ctx->device, fb, nullptr); fb = VK_NULL_HANDLE; }
+    if (!ctx->commandBuffers.empty()) {
+        vkFreeCommandBuffers(ctx->device, ctx->commandPool,
+                              (uint32_t)ctx->commandBuffers.size(), ctx->commandBuffers.data());
+        ctx->commandBuffers.clear();
+    }
+    if (ctx->renderPass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(ctx->device, ctx->renderPass, nullptr); ctx->renderPass = VK_NULL_HANDLE;
+    }
+    for (auto& iv : ctx->swapchainImageViews)
+        if (iv != VK_NULL_HANDLE) { vkDestroyImageView(ctx->device, iv, nullptr); iv = VK_NULL_HANDLE; }
+    ctx->swapchainImageViews.clear();
+    ctx->swapchainImages.clear();
+
+    ctx->createSwapchain(ctx->instance, ctx->physicalDevice, ctx->device, w, h);
+    std::cerr << "[ravynOS] Swapchain recreated for resize: " << w << "x" << h << "\n";
+}
+
 static void transitionImageLayout(VkDevice dev, VkCommandPool pool, VkQueue queue,
                                    VkImage image,
                                    VkImageLayout oldLayout, VkImageLayout newLayout) {
@@ -1167,6 +1194,13 @@ void VulkanRenderContext::presentFrame(uint32_t imageIndex) {
 void presentNextFrame(VulkanRenderContext* ctx) {
     if (!ctx || ctx->device == VK_NULL_HANDLE || ctx->swapchain == VK_NULL_HANDLE) return;
 
+    if (g_pendingResize.exchange(false, std::memory_order_acq_rel)) {
+        uint32_t w = g_pendingResizeW.load(std::memory_order_acquire);
+        uint32_t h = g_pendingResizeH.load(std::memory_order_acquire);
+        recreateSwapchainForSize(ctx, w, h);
+        return;
+    }
+
     if (ctx->needsSwapchainRecreation) {
         ctx->recreateSwapchain();
         return;
@@ -1255,52 +1289,56 @@ bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airByteco
 
 static void dispatchMouseEvent(id nsApp, NSPoint p, uint32_t nsEventType) {
     if (!nsApp) return;
-    typedef id (*MouseEventFn)(id, SEL,
-                               unsigned long,
-                               NSPoint,
-                               unsigned long,
-                               double,
-                               long,
-                               id,
-                               long,
-                               long,
-                               float);
-    static SEL sel = sel_registerName(
-        "mouseEventWithType:location:modifierFlags:"
-        "timestamp:windowNumber:context:eventNumber:clickCount:pressure:");
-    auto fn = (MouseEventFn)(void*)objc_msgSend;
-    id ev = fn((id)objc_getClass("NSEvent"), sel,
-               (unsigned long)nsEventType, p,
-               (unsigned long)0, 0.0, 0L, (id)nullptr, 0L, 1L, 1.0f);
-    if (ev) objc_msgSend(nsApp, sel_registerName("sendEvent:"), ev);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typedef id (*MouseEventFn)(id, SEL,
+                                   unsigned long,
+                                   NSPoint,
+                                   unsigned long,
+                                   double,
+                                   long,
+                                   id,
+                                   long,
+                                   long,
+                                   float);
+        static SEL sel = sel_registerName(
+            "mouseEventWithType:location:modifierFlags:"
+            "timestamp:windowNumber:context:eventNumber:clickCount:pressure:");
+        auto fn = (MouseEventFn)(void*)objc_msgSend;
+        id ev = fn((id)objc_getClass("NSEvent"), sel,
+                   (unsigned long)nsEventType, p,
+                   (unsigned long)0, 0.0, 0L, (id)nullptr, 0L, 1L, 1.0f);
+        if (ev) objc_msgSend(nsApp, sel_registerName("sendEvent:"), ev);
+    });
 }
 
 static void dispatchKeyEvent(id nsApp, uint16_t keyCode, bool down) {
     if (!nsApp) return;
-    typedef id (*KeyEventFn)(id, SEL,
-                              unsigned long,
-                              NSPoint,
-                              unsigned long,
-                              double,
-                              long,
-                              id,
-                              id,
-                              id,
-                              BOOL,
-                              unsigned short);
-    static SEL sel = sel_registerName(
-        "keyEventWithType:location:modifierFlags:timestamp:"
-        "windowNumber:context:characters:charactersIgnoringModifiers:"
-        "isARepeat:keyCode:");
-    id emptyStr = objc_msgSend((id)objc_getClass("NSString"), sel_registerName("string"));
-    NSPoint zero{ 0.0, 0.0 };
-    auto fn = (KeyEventFn)(void*)objc_msgSend;
-    id ev = fn((id)objc_getClass("NSEvent"), sel,
-               (unsigned long)(down ? 10u : 11u), zero,
-               (unsigned long)0, 0.0, 0L,
-               (id)nullptr, emptyStr, emptyStr,
-               (BOOL)NO, (unsigned short)keyCode);
-    if (ev) objc_msgSend(nsApp, sel_registerName("sendEvent:"), ev);
+    dispatch_async(dispatch_get_main_queue(), ^{
+        typedef id (*KeyEventFn)(id, SEL,
+                                  unsigned long,
+                                  NSPoint,
+                                  unsigned long,
+                                  double,
+                                  long,
+                                  id,
+                                  id,
+                                  id,
+                                  BOOL,
+                                  unsigned short);
+        static SEL sel = sel_registerName(
+            "keyEventWithType:location:modifierFlags:timestamp:"
+            "windowNumber:context:characters:charactersIgnoringModifiers:"
+            "isARepeat:keyCode:");
+        id emptyStr = objc_msgSend((id)objc_getClass("NSString"), sel_registerName("string"));
+        NSPoint zero{ 0.0, 0.0 };
+        auto fn = (KeyEventFn)(void*)objc_msgSend;
+        id ev = fn((id)objc_getClass("NSEvent"), sel,
+                   (unsigned long)(down ? 10u : 11u), zero,
+                   (unsigned long)0, 0.0, 0L,
+                   (id)nullptr, emptyStr, emptyStr,
+                   (BOOL)NO, (unsigned short)keyCode);
+        if (ev) objc_msgSend(nsApp, sel_registerName("sendEvent:"), ev);
+    });
 }
 
 struct MachMousePayload {
@@ -1382,15 +1420,20 @@ static void* ravynEventLoopThread(void* arg) {
                 }
             } else if (ev.filter == EVFILT_TIMER) {
                 if (nsApp) {
-                    id runLoopMode = objc_msgSend(
-                        (id)objc_getClass("NSString"),
-                        sel_registerName("stringWithUTF8String:"),
-                        "kCFRunLoopDefaultMode");
-                    id event = objc_msgSend(nsApp,
-                        sel_registerName("nextEventMatchingMask:untilDate:inMode:dequeue:"),
-                        (unsigned long)~0UL, nullptr, runLoopMode, (BOOL)YES);
-                    if (event) objc_msgSend(nsApp, sel_registerName("sendEvent:"), event);
-                    objc_msgSend(nsApp, sel_registerName("updateWindows"));
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        id runLoopMode = objc_msgSend(
+                            (id)objc_getClass("NSString"),
+                            sel_registerName("stringWithUTF8String:"),
+                            "kCFRunLoopDefaultMode");
+                        id distantPast = objc_msgSend(
+                            (id)objc_getClass("NSDate"),
+                            sel_registerName("distantPast"));
+                        id event = objc_msgSend(nsApp,
+                            sel_registerName("nextEventMatchingMask:untilDate:inMode:dequeue:"),
+                            (unsigned long)~0UL, distantPast, runLoopMode, (BOOL)YES);
+                        if (event) objc_msgSend(nsApp, sel_registerName("sendEvent:"), event);
+                        objc_msgSend(nsApp, sel_registerName("updateWindows"));
+                    });
                 }
                 presentNextFrame(ctx);
                 ++frameCount;
@@ -1538,7 +1581,10 @@ static void run_impl(id, SEL) {
         runDarwinEventLoop(ctx);
     } catch (std::exception& e) {
         std::cerr << "[ravynOS] Fatal: " << e.what() << "\n";
+        return;
     }
+    std::cerr << "[ravynOS] NSApplication -run: pumping main thread CFRunLoop\n";
+    CFRunLoopRun();
 }
 
 static id winInit_func(id self, SEL _cmd,
@@ -1622,10 +1668,15 @@ static void setFrame_func(id self, SEL _cmd, NSRect frame, BOOL display) {
     double nh = frame.size.height > 0.0 ? frame.size.height : ws.h;
     bool resized = (nw != ws.w || nh != ws.h);
     ws.w = nw; ws.h = nh;
-    if (resized && ws.surface) {
-        IOSurfaceRelease(ws.surface);
-        ws.surface = nullptr;
-        allocateWindowSurface(ws);
+    if (resized) {
+        g_pendingResizeW.store((uint32_t)nw, std::memory_order_release);
+        g_pendingResizeH.store((uint32_t)nh, std::memory_order_release);
+        g_pendingResize.store(true, std::memory_order_release);
+        if (ws.surface) {
+            IOSurfaceRelease(ws.surface);
+            ws.surface = nullptr;
+            allocateWindowSurface(ws);
+        }
     }
     if (ws.machPort != MACH_PORT_NULL) {
         RavynMsgResize msg{};
