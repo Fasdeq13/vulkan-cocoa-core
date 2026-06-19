@@ -53,6 +53,8 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IRBuilder.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/InstIterator.h>
+#include <llvm/Support/Casting.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Metadata.h>
 #include <llvm/IR/Module.h>
@@ -91,6 +93,10 @@ typedef struct { double width; double height; } NSSize;
 typedef struct { NSPoint origin; NSSize size; } NSRect;
 
 static std::mutex g_vulkan_mutex;
+static std::atomic<bool>     g_eventLoopShouldStop{false};
+static std::atomic<bool>     g_eventLoopRunning{false};
+static pthread_t             g_eventLoopThreadHandle{};
+static std::atomic<bool>     g_eventLoopThreadValid{false};
 
 enum {
     kIOSurfaceMethodCreate         = 0,
@@ -569,6 +575,12 @@ VulkanRenderContext::VulkanRenderContext()
 {}
 
 VulkanRenderContext::~VulkanRenderContext() {
+    g_eventLoopShouldStop.store(true, std::memory_order_release);
+    if (g_eventLoopThreadValid.load(std::memory_order_acquire)) {
+        pthread_join(g_eventLoopThreadHandle, nullptr);
+        g_eventLoopThreadValid.store(false, std::memory_order_release);
+    }
+
     std::lock_guard<std::mutex> lock(g_vulkan_mutex);
     if (device != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device);
@@ -1187,7 +1199,7 @@ bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airByteco
                                               std::vector<uint32_t>&       outSpirv) {
     if (airBytecode.empty()) return false;
 
-    static llvm::LLVMContext llvmCtx;
+    llvm::LLVMContext llvmCtx;
 
     std::string bin(airBytecode.begin(), airBytecode.end());
     llvm::MemoryBufferRef bufRef(bin, "AIR_Stream");
@@ -1204,6 +1216,19 @@ bool AIRToSPIRVCompiler::compileAIRToSPIRV(const std::vector<uint8_t>& airByteco
     transformAppleMemoryBarriers(M.get());
     transformThreadgroupAddressSpace(M.get());
     processAppleIntrinsics(M.get());
+
+    for (auto& F : *M) {
+        for (auto& BB : F) {
+            for (auto& I : BB) {
+                if (auto* call = llvm::dyn_cast<llvm::CallInst>(&I)) {
+                    llvm::Function* callee = call->getCalledFunction();
+                    if (callee && callee->getName().contains("argument_buffer")) {
+                        injectBindlessDescriptors(M.get(), call, 0);
+                    }
+                }
+            }
+        }
+    }
 
     SPIRV::TranslatorOpts opts;
     opts.enableAllExtensions();
@@ -1799,69 +1824,85 @@ int NSApplicationMain(int argc, const char* argv[]) {
         std::cerr << "[ravynOS] Registered: " << name << "\n";
     };
 
-    safeAddClass("NSApplication", [](Class c, Class meta) {
-        class_addMethod(meta, sel_registerName("sharedApplication"),
+    auto swizzleExisting = [&](const char* name,
+                                std::function<void(Class, Class)> setup) {
+        Class c = objc_getClass(name);
+        if (!c) return false;
+        Class meta = object_getClass((id)c);
+        setup(c, meta);
+        std::cerr << "[ravynOS] Swizzled existing class: " << name << "\n";
+        return true;
+    };
+
+    auto addOrSwizzleClass = [&](const char* name,
+                                  std::function<void(Class, Class)> setup) {
+        if (!swizzleExisting(name, setup))
+            safeAddClass(name, setup);
+    };
+
+    addOrSwizzleClass("NSApplication", [](Class c, Class meta) {
+        class_replaceMethod(meta, sel_registerName("sharedApplication"),
                          (IMP)sharedApplication_impl, "@:");
-        class_addMethod(c, sel_registerName("run"),
+        class_replaceMethod(c, sel_registerName("run"),
                          (IMP)run_impl, "v@:");
     });
 
-    safeAddClass("NSWindow", [](Class c, Class) {
-        class_addMethod(c,
+    addOrSwizzleClass("NSWindow", [](Class c, Class) {
+        class_replaceMethod(c,
             sel_registerName("initWithContentRect:styleMask:backing:defer:"),
             (IMP)winInit_func,
             "@@:{NSRect={NSPoint=dd}{NSSize=dd}}LLB");
-        class_addMethod(c, sel_registerName("setTitle:"),
+        class_replaceMethod(c, sel_registerName("setTitle:"),
                          (IMP)setTitle_func, "v@:@");
-        class_addMethod(c, sel_registerName("makeKeyAndOrderFront:"),
+        class_replaceMethod(c, sel_registerName("makeKeyAndOrderFront:"),
                          (IMP)makeKey_func, "v@:@");
-        class_addMethod(c, sel_registerName("center"),
+        class_replaceMethod(c, sel_registerName("center"),
                          (IMP)center_func, "v@:");
-        class_addMethod(c, sel_registerName("contentView"),
+        class_replaceMethod(c, sel_registerName("contentView"),
                          (IMP)contentView_func, "@@:");
-        class_addMethod(c, sel_registerName("setFrame:display:"),
+        class_replaceMethod(c, sel_registerName("setFrame:display:"),
                          (IMP)setFrame_func,
                          "v@:{NSRect={NSPoint=dd}{NSSize=dd}}B");
-        class_addMethod(c, sel_registerName("orderOut:"),
+        class_replaceMethod(c, sel_registerName("orderOut:"),
                          (IMP)orderOut_func, "v@:@");
-        class_addMethod(c, sel_registerName("frame"),
+        class_replaceMethod(c, sel_registerName("frame"),
                          (IMP)frame_func,
                          "{NSRect={NSPoint=dd}{NSSize=dd}}@:");
     });
 
-    safeAddClass("NSView", [](Class c, Class) {
-        class_addMethod(c, sel_registerName("setLayer:"),
+    addOrSwizzleClass("NSView", [](Class c, Class) {
+        class_replaceMethod(c, sel_registerName("setLayer:"),
                          (IMP)setLayer_func, "v@:@");
-        class_addMethod(c, sel_registerName("setWantsLayer:"),
+        class_replaceMethod(c, sel_registerName("setWantsLayer:"),
                          (IMP)setWantsLayer_func, "v@:B");
-        class_addMethod(c, sel_registerName("layer"),
+        class_replaceMethod(c, sel_registerName("layer"),
                          (IMP)layer_func, "@@:");
-        class_addMethod(c, sel_registerName("frame"),
+        class_replaceMethod(c, sel_registerName("frame"),
                          (IMP)frame_func,
                          "{NSRect={NSPoint=dd}{NSSize=dd}}@:");
-        class_addMethod(c, sel_registerName("bounds"),
+        class_replaceMethod(c, sel_registerName("bounds"),
                          (IMP)bounds_func,
                          "{NSRect={NSPoint=dd}{NSSize=dd}}@:");
     });
 
-    safeAddClass("NSColorSpace", [](Class, Class meta) {
-        class_addMethod(meta, sel_registerName("sRGBColorSpace"),
+    addOrSwizzleClass("NSColorSpace", [](Class, Class meta) {
+        class_replaceMethod(meta, sel_registerName("sRGBColorSpace"),
                          (IMP)srgb_func, "@:");
     });
 
-    safeAddClass("NSFont", [](Class, Class meta) {
-        class_addMethod(meta, sel_registerName("systemFontOfSize:"),
+    addOrSwizzleClass("NSFont", [](Class, Class meta) {
+        class_replaceMethod(meta, sel_registerName("systemFontOfSize:"),
                          (IMP)sysFont_func, "@:d");
-        class_addMethod(meta, sel_registerName("boldSystemFontOfSize:"),
+        class_replaceMethod(meta, sel_registerName("boldSystemFontOfSize:"),
                          (IMP)boldFont_func, "@:d");
     });
 
-    safeAddClass("NSScreen", [](Class c, Class meta) {
-        class_addMethod(meta, sel_registerName("screens"),
+    addOrSwizzleClass("NSScreen", [](Class c, Class meta) {
+        class_replaceMethod(meta, sel_registerName("screens"),
                          (IMP)screens_func, "@@:");
-        class_addMethod(meta, sel_registerName("mainScreen"),
+        class_replaceMethod(meta, sel_registerName("mainScreen"),
                          (IMP)mainScreen_func, "@@:");
-        class_addMethod(c,
+        class_replaceMethod(c,
                          sel_registerName("frame"),
                          (IMP)screenFrame_func,
                          "{NSRect={NSPoint=dd}{NSSize=dd}}@:");
