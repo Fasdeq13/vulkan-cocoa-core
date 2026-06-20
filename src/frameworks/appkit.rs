@@ -1,123 +1,182 @@
-use crate::vulkan_backend::swapchain::WindowRenderContext;
-use ash::vk;
-use objc2::{declare_class, msg_send, mutability, rc::Id, runtime::NSObject, DeclaredClass};
-use objc2_foundation::NSRect;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::ffi::{c_char, c_void, CString};
+use std::sync::{Mutex, OnceLock};
 
-declare_class!(
-    pub struct NSApplication;
+pub type Id = *mut c_void;
+pub type Class = *mut c_void;
+pub type Sel = *mut c_void;
+pub type Imp = *const c_void;
 
-    unsafe impl ClassType for NSApplication {
-        type Super = NSObject;
-        type Mutability = mutability::InteriorMutable;
-        const NAME: &'static str = "NSApplication";
+pub const NO: i8 = 0;
+pub const YES: i8 = 1;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NSPoint {
+    pub x: f64,
+    pub y: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NSSize {
+    pub width: f64,
+    pub height: f64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct NSRect {
+    pub origin: NSPoint,
+    pub size: NSSize,
+}
+
+extern "C" {
+    pub fn objc_allocateClassPair(superclass: Class, name: *const c_char, extra_bytes: usize) -> Class;
+    pub fn objc_registerClassPair(cls: Class);
+    pub fn objc_getClass(name: *const c_char) -> Class;
+    pub fn object_getClass(obj: Id) -> Class;
+    pub fn class_addMethod(cls: Class, sel: Sel, imp: Imp, types: *const c_char) -> bool;
+    pub fn class_replaceMethod(cls: Class, sel: Sel, imp: Imp, types: *const c_char) -> Imp;
+    pub fn sel_registerName(name: *const c_char) -> Sel;
+    pub fn objc_msgSend();
+}
+
+#[link(name = "CoreFoundation", kind = "framework")]
+extern "C" {
+    pub fn CFRunLoopRun();
+}
+
+pub fn sel(name: &str) -> Sel {
+    let c = CString::new(name).expect("selector name had a NUL byte");
+    unsafe { sel_registerName(c.as_ptr()) }
+}
+
+pub fn class(name: &str) -> Class {
+    let c = CString::new(name).expect("class name had a NUL byte");
+    unsafe { objc_getClass(c.as_ptr()) }
+}
+
+pub unsafe fn send0_id(recv: Id, s: Sel) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel) -> Id = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s)
+}
+
+pub unsafe fn send0_void(recv: Id, s: Sel) {
+    let f: unsafe extern "C" fn(Id, Sel) = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s)
+}
+
+pub unsafe fn send0_bool(recv: Id, s: Sel) -> bool {
+    let f: unsafe extern "C" fn(Id, Sel) -> i8 = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s) != 0
+}
+
+pub unsafe fn send0_u64(recv: Id, s: Sel) -> u64 {
+    let f: unsafe extern "C" fn(Id, Sel) -> u64 = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s)
+}
+
+pub unsafe fn send0_rect(recv: Id, s: Sel) -> NSRect {
+    let f: unsafe extern "C" fn(Id, Sel) -> NSRect = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s)
+}
+
+pub unsafe fn send1_id_id(recv: Id, s: Sel, a: Id) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel, Id) -> Id = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s, a)
+}
+
+pub unsafe fn send1_void_id(recv: Id, s: Sel, a: Id) {
+    let f: unsafe extern "C" fn(Id, Sel, Id) = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s, a)
+}
+
+pub unsafe fn send1_id_ptr(recv: Id, s: Sel, a: *mut c_void) -> Id {
+    let f: unsafe extern "C" fn(Id, Sel, *mut c_void) -> Id = std::mem::transmute(objc_msgSend as *const ());
+    f(recv, s, a)
+}
+
+pub unsafe fn send_str(recv: Id, s: Sel, text: &str) -> Id {
+    let nsstr = ns_string(text);
+    send1_id_id(recv, s, nsstr)
+}
+
+pub fn ns_string(text: &str) -> Id {
+    let c = CString::new(text).unwrap_or_else(|_| CString::new("").unwrap());
+    unsafe {
+        let cls = class("NSString");
+        let obj = send0_id(cls, sel("alloc"));
+        let f: unsafe extern "C" fn(Id, Sel, *const c_char) -> Id =
+            std::mem::transmute(objc_msgSend as *const ());
+        f(obj, sel("initWithUTF8String:"), c.as_ptr())
     }
+}
 
-    unsafe impl DeclaredClass for NSApplication {}
-
-    unsafe impl NSApplication {
-        #[method(sharedApplication)]
-        pub fn shared_application() -> Option<Id<Self>> {
-            unsafe { msg_send![class!(NSApplication), alloc] }
-        }
-
-        #[method(run)]
-        pub fn run(&self) {
-            loop {
-                let event: Option<Id<NSObject>> = unsafe { msg_send![self, nextEventMatchingMask: usize::MAX untilDate: std::ptr::null::<NSObject>() inMode: std::ptr::null::<NSObject>() dequeue: true] };
-                if let Some(ev) = event {
-                    unsafe {
-                        let _: () = msg_send![self, sendEvent: &ev];
-                    }
-                }
-            }
+pub fn ns_string_to_rust(obj: Id) -> String {
+    if obj.is_null() {
+        return String::new();
+    }
+    unsafe {
+        let f: unsafe extern "C" fn(Id, Sel) -> *const c_char = std::mem::transmute(objc_msgSend as *const ());
+        let ptr = f(obj, sel("UTF8String"));
+        if ptr.is_null() {
+            String::new()
+        } else {
+            std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned()
         }
     }
-);
+}
 
-declare_class!(
-    pub struct NSWindow;
+#[derive(Debug, Default)]
+pub struct WindowState {
+    pub frame: NSRect,
+    pub title: String,
+    pub is_key: bool,
+    pub wants_layer: bool,
+    pub layer: Id,
+    pub delegate: Id,
+}
 
-    unsafe impl ClassType for NSWindow {
-        type Super = NSObject;
-        type Mutability = mutability::InteriorMutable;
-        const NAME: &'static str = "NSWindow";
-    }
+unsafe impl Send for WindowState {}
 
-    unsafe impl DeclaredClass for NSWindow {}
+fn window_states() -> &'static Mutex<HashMap<usize, WindowState>> {
+    static STATES: OnceLock<Mutex<HashMap<usize, WindowState>>> = OnceLock::new();
+    STATES.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
-    unsafe impl NSWindow {
-        #[method(initWithContentRect:styleMask:backing:defer:)]
-        pub fn init_with_content_rect(
-            &mut self,
-            rect: NSRect,
-            _style_mask: usize,
-            _backing: usize,
-            _defer: bool,
-        ) -> Option<Id<Self>> {
-            let this: Option<Id<Self>> = unsafe { msg_send![super(this), init] };
-            if this.is_some() {
-                if let Some(shared) = unsafe { crate::frameworks::metal_sys::G_SHARED_DEVICE.as_ref() } {
-                    let surface = vk::SurfaceKHR::null();
-                    if let Ok(render_ctx) = WindowRenderContext::new(
-                        Arc::clone(shared),
-                        surface,
-                        rect.size.width as u32,
-                        rect.size.height as u32,
-                        None,
-                    ) {
-                        crate::frameworks::quartz_core::set_global_render_context(render_ctx);
-                    }
-                }
-                let view: Option<Id<NSView>> = unsafe { msg_send![class!(NSView), alloc] };
-                if let Some(v) = view {
-                    unsafe {
-                        let _: Id<NSView> = msg_send![v, initWithFrame: rect];
-                        let _: () = msg_send![this.as_ref().unwrap(), setContentView: &v];
-                    }
-                }
-            }
-            this
-        }
+pub fn with_window_state<R>(obj: Id, f: impl FnOnce(&mut WindowState) -> R) -> R {
+    let key = obj as usize;
+    let mut map = window_states().lock().expect("window state mutex poisoned");
+    let state = map.entry(key).or_default();
+    f(state)
+}
 
-        #[method(contentView)]
-        pub fn content_view(&self) -> Option<Id<NSView>> {
-            unsafe { msg_send![self, contentView] }
-        }
-    }
-);
+pub fn remove_window_state(obj: Id) {
+    let key = obj as usize;
+    let mut map = window_states().lock().expect("window state mutex poisoned");
+    map.remove(&key);
+}
 
-declare_class!(
-    pub struct NSView;
+fn monitor_table() -> &'static Mutex<Vec<NSRect>> {
+    static MONITORS: OnceLock<Mutex<Vec<NSRect>>> = OnceLock::new();
+    MONITORS.get_or_init(|| {
+        Mutex::new(vec![NSRect {
+            origin: NSPoint::default(),
+            size: NSSize {
+                width: 1920.0,
+                height: 1080.0,
+            },
+        }])
+    })
+}
 
-    unsafe impl ClassType for NSView {
-        type Super = NSObject;
-        type Mutability = mutability::InteriorMutable;
-        const NAME: &'static str = "NSView";
-    }
+pub fn set_monitors(monitors: Vec<NSRect>) {
+    let mut table = monitor_table().lock().expect("monitor table mutex poisoned");
+    *table = monitors;
+}
 
-    unsafe impl DeclaredClass for NSView {}
-
-    unsafe impl NSView {
-        #[method(initWithFrame:)]
-        pub fn init_with_frame(&mut self, _frame: NSRect) -> Option<Id<Self>> {
-            let this: Option<Id<Self>> = unsafe { msg_send![super(this), init] };
-            if this.is_some() {
-                let layer: Option<Id<NSObject>> = unsafe { msg_send![class!(CAMetalLayer), alloc] };
-                if let Some(l) = layer {
-                    unsafe {
-                        let _: Id<NSObject> = msg_send![l, init];
-                        let _: () = msg_send![this.as_ref().unwrap(), setLayer: &l];
-                        let _: () = msg_send![this.as_ref().unwrap(), setWantsLayer: true];
-                    }
-                }
-            }
-            this
-        }
-
-        #[method(layer)]
-        pub fn layer(&self) -> Option<Id<NSObject>> {
-            unsafe { msg_send![self, layer] }
-        }
-    }
-);
+pub fn with_monitors<R>(f: impl FnOnce(&[NSRect]) -> R) -> R {
+    let table = monitor_table().lock().expect("monitor table mutex poisoned");
+    f(&table)
+}
