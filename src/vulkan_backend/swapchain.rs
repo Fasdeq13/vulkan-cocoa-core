@@ -7,7 +7,7 @@ use thiserror::Error;
 
 pub const MAX_FRAMES_IN_FLIGHT: usize = 3;
 
-@derive(Error, Debug)
+#[derive(Error, Debug)]
 pub enum SwapchainError {
     #[error("vulkan error: {0}")]
     Vk(#[from] vk::Result),
