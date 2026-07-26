@@ -32,26 +32,19 @@ fn main() {
                             .flag("-x")
                             .flag("objective-c")
                             .flag("-fno-objc-arc")
+                            // Подключаем системные фреймворки прямо при сборке .m файла
+                            .flag("-framework")
+                            .flag("Cocoa")
+                            .flag("-framework")
+                            .flag("Metal")
+                            .flag("-framework")
+                            .flag("QuartzCore")
+                            .flag("-framework")
+                            .flag("IOKit")
+                            .flag("-framework")
+                            .flag("IOSurface")
                             .file(&path)
                             .compile(&format!("objc_{}", path.file_stem().unwrap().to_str().unwrap()));
-                    }
-                    "swift" => {
-                        let obj_path = format!("target/release/{}.o", path.file_stem().unwrap().to_str().unwrap());
-                        let _ = fs::create_dir_all("target/release");
-
-                        let status = std::process::Command::new("swiftc")
-                            .arg("-emit-object")
-                            .arg("-o")
-                            .arg(&obj_path)
-                            .arg(&path)
-                            .status();
-                        
-                        if let Ok(s) = status {
-                            if !s.success() {
-                                panic!("Swift compilation failed for: {}", path.display());
-                            }
-                            println!("cargo:rustc-link-search=native=target/release");
-                        }
                     }
                     _ => {}
                 }
@@ -61,12 +54,12 @@ fn main() {
 
     build.compile("native_core");
 
+    // Линковка фреймворков для Rust-части
     println!("cargo:rustc-link-lib=framework=Cocoa");
     println!("cargo:rustc-link-lib=framework=Metal");
     println!("cargo:rustc-link-lib=framework=QuartzCore");
     println!("cargo:rustc-link-lib=framework=IOKit");
     println!("cargo:rustc-link-lib=framework=IOSurface");
-    println!("cargo:rustc-link-lib=swiftCore");
 
     println!("cargo:rerun-if-changed=build.rs");
 }
