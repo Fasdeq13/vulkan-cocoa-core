@@ -27,13 +27,15 @@ objc2-quartz-core = "0.2.2"
 core-foundation = "0.10"
 mach2 = "0.4"
 
+[build-dependencies]
+cc = "1.0"
+
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
-panic-immediate-abort = true
-strip = "all"
+strip = "symbols"
 incremental = false
 
 [profile.dev]
