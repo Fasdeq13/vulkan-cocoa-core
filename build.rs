@@ -10,7 +10,8 @@ fn main() {
     let mut build = cc::Build::new();
     build.cpp(true)
          .opt_level(3)
-         .flag("-std=c++17");
+         .flag("-std=c++17")
+         .include("native");
 
     if let Ok(entries) = fs::read_dir(native_dir) {
         for entry in entries.flatten() {
@@ -24,11 +25,13 @@ fn main() {
                     }
                     "c" => {
                         cc::Build::new()
+                            .include("native")
                             .file(&path)
                             .compile(&format!("c_{}", path.file_stem().unwrap().to_str().unwrap()));
                     }
                     "m" => {
                         cc::Build::new()
+                            .include("native")
                             .flag("-x")
                             .flag("objective-c")
                             .flag("-fno-objc-arc")
