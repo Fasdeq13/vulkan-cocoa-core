@@ -1,3 +1,5 @@
+#import <Cocoa/Cocoa.h>
+#import <mach/mach_time.h>
 #import <Foundation/Foundation.h>
 #import <mach/mach.h>
 #import <mach/message.h>
