@@ -8,7 +8,7 @@ description = "Vulkan-on-Darwin compositor backend for ravynOS"
 [lib]
 name = "vulkan_cocoa_core_bridge"
 path = "src/lib.rs"
-crate-type = ["cdylib", "rlib"] 
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 ash = { version = "0.38", features = ["linked"] }
