@@ -31,6 +31,7 @@ fn main() {
                         cc::Build::new()
                             .flag("-x")
                             .flag("objective-c")
+                            .flag("-fno-objc-arc")
                             .file(&path)
                             .compile(&format!("objc_{}", path.file_stem().unwrap().to_str().unwrap()));
                     }
