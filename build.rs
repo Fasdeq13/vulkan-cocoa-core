@@ -32,7 +32,6 @@ fn main() {
                             .flag("-x")
                             .flag("objective-c")
                             .flag("-fno-objc-arc")
-                            // Подключаем системные фреймворки прямо при сборке .m файла
                             .flag("-framework")
                             .flag("Cocoa")
                             .flag("-framework")
@@ -54,7 +53,6 @@ fn main() {
 
     build.compile("native_core");
 
-    // Линковка фреймворков для Rust-части
     println!("cargo:rustc-link-lib=framework=Cocoa");
     println!("cargo:rustc-link-lib=framework=Metal");
     println!("cargo:rustc-link-lib=framework=QuartzCore");
