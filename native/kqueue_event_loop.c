@@ -1,3 +1,6 @@
+#ifndef NOTE_MSECONDS
+#define NOTE_MSECONDS 0x00000001
+#endif
 #include <sys/types.h>
 #include <sys/event.h>
 #include <sys/time.h>
